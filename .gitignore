@@ -1,0 +1,33 @@
+# Google-Zugangsdaten – niemals hochladen!
+token.json
+service_account.json
+oauth_credentials.json
+
+# Lokale Einstellungen
+settings.json
+tour_zeiten_*.json
+
+# Alte Backups (nur im Ordner, nicht auf GitHub)
+Bombadil_BACKUP_*.py
+Bombadil_backup_*.py
+Bombadil_admin.py
+
+# Debug-Skripte
+debug_*.py
+
+# Hilfsskripte (intern)
+fix_quotes.py
+make_anweisung.py
+report_preview.py
+restore_from_gdrive.py
+dedupe_tagesbote_vs_abholer.py
+
+# Claude-interne Einstellungen
+.claude/
+
+# Python-Cache
+__pycache__/
+*.pyc
+
+# Lokale Backup-Ordner
+Backups/
