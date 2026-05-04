@@ -4237,11 +4237,13 @@ class PickupHeuteTab:
                 ])
             except Exception:
                 pass
+            self._sheet.bind("<Button-3>", self._on_right_click)
         except ImportError:
             self._sheet = None
             tk.Label(self.frame, text="tksheet nicht installiert").pack()
 
-        self._last_data: list = []   # zuletzt gerenderte Zeilen für Barcode-Kopieren
+        self._last_data: list = []        # zuletzt gerenderte Zeilen für Barcode-Kopieren
+        self._displayed_rows: list = []   # gefilterte/sortierte Zeilen die aktuell sichtbar sind
 
         # Automatischer erster Load 2 Sekunden nach Programmstart
         self.frame.after(2000, self._run)
@@ -4261,6 +4263,71 @@ class PickupHeuteTab:
                         text=orig, fg="#555"))
         except Exception:
             pass
+
+    def _on_right_click(self, event):
+        """Rechtsklick auf eine Zeile → Kontextmenü für Packstatus-Korrektur."""
+        if not self._sheet:
+            return
+        # Zeilenindex aus y-Koordinate ermitteln
+        try:
+            row_idx = self._sheet.identify_row(event, allow_end=False)
+        except Exception:
+            try:
+                sel = list(self._sheet.get_selected_rows())
+                row_idx = sel[0] if sel else None
+            except Exception:
+                row_idx = None
+        if row_idx is None:
+            return
+        disp = self._displayed_rows
+        if row_idx >= len(disp):
+            return
+        r = disp[row_idx]
+        if not r.get("_tb_row_id"):
+            return   # kein Tagesboten-Eintrag → kein Menü
+
+        menu = tk.Menu(self.frame, tearoff=0)
+        already_vp = r["tb_status"].lower() == "verpackt"
+        menu.add_command(
+            label="✓  Verpackt setzen",
+            state="disabled" if already_vp else "normal",
+            command=lambda: self._set_kontrollstatus(r, "Verpackt")
+        )
+        menu.add_command(
+            label="○  Offen setzen",
+            state="disabled" if not already_vp else "normal",
+            command=lambda: self._set_kontrollstatus(r, "Offen")
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_kontrollstatus(self, r, new_status):
+        """Setzt den Kontrollstatus einer Zeile in OrcaScan und aktualisiert die Anzeige."""
+        import threading as _thr
+        self.status_lbl.config(
+            text=f"⏳  Setze Packstatus auf '{new_status}' …", fg="#e67e22")
+
+        def _worker():
+            result = update_rows_orca_bulk(
+                [(r["_tb_row_id"], r["barcode"], r["name"])],
+                {"Kontrollstatus": new_status},
+                sheet_id=ORCA_TAGESBOTE_SHEET_ID
+            )
+            self.frame.after(0, lambda: _done(result))
+
+        def _done(result):
+            if result["failed"]:
+                self.status_lbl.config(
+                    text=f"❌  Fehler beim Setzen: {result['failed'][0][:60]}", fg="#c0392b")
+            else:
+                r["tb_status"] = new_status   # lokal sofort aktualisieren
+                self._refresh_ui()
+                self.status_lbl.config(
+                    text=f"✓  Packstatus '{new_status}' gesetzt – {r['barcode']}", fg="#27ae60")
+
+        _thr.Thread(target=_worker, daemon=True).start()
 
     # ── Tour-Abfahrt Steuerung ────────────────────────────────────────────
     def _lese_netz_tour_zeiten(self):
@@ -4656,6 +4723,8 @@ class PickupHeuteTab:
 
         if self._sort_col is None or self._sort_dir == 0:
             rows = sorted(rows, key=lambda r: (_stage(r), _tour_order(r)))
+
+        self._displayed_rows = rows   # für Rechtsklick-Menü merken
 
         data = [
             [r.get("tour", ""), r["barcode"], r["name"], r["tb_status"], r["in_db"],
