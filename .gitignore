@@ -1,4 +1,5 @@
-# Google-Zugangsdaten – niemals hochladen!
+# API-Keys und Zugangsdaten – niemals hochladen!
+.env
 token.json
 service_account.json
 oauth_credentials.json

@@ -73,6 +73,66 @@ BASE_DIR      = Path(__file__).resolve().parent
 SETTINGS_FILE = BASE_DIR / "settings.json"
 LOGO_PATH = BASE_DIR / "logo.png"   # optional
 
+# ============================================================
+# Version & Auto-Updater
+# ============================================================
+VERSION = "1.0.0"
+
+GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/main"
+
+def check_for_update():
+    """Prüft beim Start ob eine neuere Version auf GitHub verfügbar ist."""
+    import urllib.request
+    import shutil
+    import subprocess
+
+    try:
+        with urllib.request.urlopen(f"{GITHUB_RAW}/version.txt", timeout=5) as r:
+            remote_version = r.read().decode().strip()
+    except Exception:
+        return  # Kein Internet oder GitHub nicht erreichbar → einfach starten
+
+    def _version_tuple(v):
+        return tuple(int(x) for x in v.split("."))
+
+    if _version_tuple(remote_version) <= _version_tuple(VERSION):
+        return  # Bereits aktuell
+
+    # Update-Dialog
+    import tkinter as tk
+    from tkinter import messagebox
+    _root = tk.Tk()
+    _root.withdraw()
+    antwort = messagebox.askyesno(
+        "Update verfügbar",
+        f"Neue Version {remote_version} verfügbar (aktuell: {VERSION}).\n\nJetzt aktualisieren?"
+    )
+    _root.destroy()
+
+    if not antwort:
+        return
+
+    # Neue Datei herunterladen
+    eigene_datei = Path(__file__).resolve()
+    backup_datei = eigene_datei.with_suffix(f".backup_{VERSION}.py")
+    try:
+        shutil.copy2(eigene_datei, backup_datei)
+        with urllib.request.urlopen(f"{GITHUB_RAW}/Bombadil.py", timeout=15) as r:
+            neue_version = r.read()
+        eigene_datei.write_bytes(neue_version)
+        # Bombadil neu starten
+        subprocess.Popen([sys.executable, str(eigene_datei)])
+        sys.exit()
+    except Exception as e:
+        import tkinter as tk
+        from tkinter import messagebox
+        _root = tk.Tk()
+        _root.withdraw()
+        messagebox.showerror("Update fehlgeschlagen", f"Fehler beim Update:\n{e}")
+        _root.destroy()
+
+check_for_update()
+
 POLL_MS = 3000
 ADMIN_MODE = True   # False = Lite-Version (kein Cleanup, kein Backup)
 
@@ -112,13 +172,16 @@ COL_TB_STATUS         = ["Status"]
 COL_TB_ZIELKIOSK      = ["Ziel-Kiosk", "Ziel Kiosk", "Ziel_Kiosk", "Zielkiosk"]
 COL_TB_ZAHLUNG        = ["Zahlung"]
 
-# OrcaScan API Konfiguration
-ORCA_API_KEY          = "orca_wXlShJ8KUMLBHzFoBzPtECqN4MN"
-ORCA_BASE_URL         = "https://api.orcascan.com/v1"
-ORCA_ABHOLER_SHEET_ID = "68f61e222eeb7a7d51598393"   # Abholer_DB
-ORCA_DHL_NORMAL_SHEET_ID = "6841a9328055676c1e79bfba"  # DHL_Normal
-ORCA_DHL_EX_SHEET_ID     = "68419cfc80f19d5dfa789430"  # DHL_Express
-ORCA_TAGESBOTE_SHEET_ID = "6936ed1cc6cbc485e4c75d28" # Tagesbote
+# OrcaScan API Konfiguration (aus .env geladen)
+from dotenv import load_dotenv as _load_dotenv
+import os as _os
+_load_dotenv(dotenv_path=BASE_DIR / ".env")
+ORCA_API_KEY             = _os.getenv("ORCA_API_KEY")
+ORCA_BASE_URL            = _os.getenv("ORCA_BASE_URL")
+ORCA_ABHOLER_SHEET_ID    = _os.getenv("ORCA_ABHOLER_SHEET_ID")    # Abholer_DB
+ORCA_DHL_NORMAL_SHEET_ID = _os.getenv("ORCA_DHL_NORMAL_SHEET_ID") # DHL_Normal
+ORCA_DHL_EX_SHEET_ID     = _os.getenv("ORCA_DHL_EX_SHEET_ID")     # DHL_Express
+ORCA_TAGESBOTE_SHEET_ID  = _os.getenv("ORCA_TAGESBOTE_SHEET_ID")  # Tagesbote
 
 # Feste Abfahrtszeiten der Tagesboten-Touren (Lokalzeit, UTC+1)
 TOUR_1_ABFAHRT = (11, 14)   # nur informativ
@@ -154,78 +217,9 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
     except Exception:
         pass
 
-def _auto_detect_t2_cutoff(rows: list) -> "str | None":
-    """
-    Analysiert Verpackt_At-Zeitstempel aller heutigen Pakete und sucht die größte
-    zeitliche Lücke zwischen aufeinanderfolgenden Scans.
-    Wenn diese Lücke ≥ 45 Minuten beträgt, wird der Zeitpunkt nach der Lücke
-    als T2-Cutoff zurückgegeben (Format "HH:MM"), sonst None.
-
-    Funktioniert weil: Tour-1-Pakete werden beim Kurier-Abholscan alle innerhalb
-    weniger Minuten erfasst (Cluster), Tour-2-Pakete Stunden später (zweiter Cluster).
-    """
-    import datetime as _dt
-    import pandas as _pd
-
-    MIN_GAP = _dt.timedelta(minutes=45)
-    today   = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).date()
-    times   = []
-
-    for r in rows:
-        raw_vp = r.get("_raw_vp")
-        if raw_vp is None:
-            continue
-        try:
-            ts = _pd.Timestamp(raw_vp)
-            if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-                ts = ts + _dt.timedelta(hours=2)
-            if ts.date() == today:
-                times.append(ts)
-        except Exception:
-            continue
-
-    if len(times) < 3:   # Zu wenig Datenpunkte
-        return None
-
-    times.sort()
-    max_gap      = _dt.timedelta(0)
-    cutoff_ts    = None
-    for i in range(1, len(times)):
-        gap = times[i] - times[i - 1]
-        if gap > max_gap:
-            max_gap   = gap
-            cutoff_ts = times[i]   # erster Scan nach der Lücke = Beginn Tour 2
-
-    if max_gap < MIN_GAP or cutoff_ts is None:
-        return None
-
-    return cutoff_ts.strftime("%H:%M")
-
-
-def _recompute_tour(r: dict, cutoff: "tuple | None", today, now) -> str:
-    """
-    Berechnet Tour-Zuweisung nur wenn ein manueller Cutoff (T1-Abfahrtszeit) gesetzt ist.
-    cutoff = (hour, minute) der T1-Abfahrt, oder None → keine Zuweisung.
-    """
-    if cutoff is None:
-        return ""
-    import pandas as _pd
-    import datetime as _dt
-    raw_vp = r.get("_raw_vp")
-    if raw_vp is not None:
-        try:
-            _ts = _pd.Timestamp(raw_vp)
-            if hasattr(_ts, "tzinfo") and _ts.tzinfo is not None:
-                _ts = _ts + _dt.timedelta(hours=2)
-            if _ts.date() < today:
-                return "T1"
-            return "T1" if (_ts.hour, _ts.minute) < cutoff else "T2"
-        except Exception:
-            return ""
-    return ""
-
 # Google Drive Konfiguration
 GDRIVE_FOLDER_ID         = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Tagesbote Upload
+TOURLISTEN_DIR           = Path(r"W:\Automatisierungen\16_EMMA\7_CAF\Buchen\Emma-3")
 GDRIVE_ABHOLER_FOLDER_ID = "1OSnMmPf--uqt4ulDGy3ILT61pUuCPzpn"   # Abholer_DB Archiv
 TAGESBOTE_SEARCH_NAME = "tagesbote"
 SERVICE_ACCOUNT_FILE  = BASE_DIR / "service_account.json"
@@ -1429,11 +1423,7 @@ def compute_pickup_heute(abholer_df: "pd.DataFrame", tagesbote_df: "pd.DataFrame
             # _abholbereit_bool: True wenn Timestamp gesetzt ODER Paketstatus = "Abholbereit"
             _abholbereit_bool = bool(abholbereit_at) or (db_status == "abholbereit")
 
-            _cutoff = tuple(map(int, t2_cutoff.split(":"))) if t2_cutoff else None
-            _now    = _dt.datetime.utcnow() + _dt.timedelta(hours=2)
-            _today  = _now.date()
-            tour    = _recompute_tour({"_raw_vp": _raw_vp, "tb_status": tb_status},
-                                      _cutoff, _today, _now)
+            tour = ""  # Tour wird ausschließlich per Button gesetzt
             # Name-Fallback: wenn Tagesbote keinen Namen hat, aus Abholer_DB nehmen
             if not name and c_name_db:
                 v = _get_db(c_name_db)
@@ -1987,6 +1977,27 @@ class TableTab:
             d = today_date().strftime("%d.%m.%Y")
             return f"Heute ({d}): {t}"
         return f"{n} / {t} Einträge" if t != n else f"{n} Einträge"
+    def _on_header_click(self, event):
+        """Spaltenheader klicken: 1x aufsteigend, 2x absteigend, 3x Standard."""
+        try:
+            col = event.selected.column
+        except Exception:
+            return
+        if col is None:
+            return
+        if col is None:
+            return
+        _sortable = {0, 1, 2, 3, 5, 6, 7}
+        if col not in _sortable:
+            return
+        if self._sort_col == col:
+            self._sort_dir = (self._sort_dir + 1) % 3
+            if self._sort_dir == 0:
+                self._sort_col = None
+        else:
+            self._sort_col = col
+            self._sort_dir = 1
+        self._refresh_ui()
 
     def _on_cell_click(self, event):
         """Barcode der angeklickten Zeile in die Zwischenablage kopieren."""
@@ -4040,8 +4051,8 @@ class PickupHeuteTab:
 
     # Spalten: Quelle Tagesbote + Abholer_DB
     _COL_HEADERS = ["Tour", "Paket-Barcode", "Name", "Packstatus", "In DB",
-                    "Verpackt", "Abholbereit", "Ziel-Kiosk", "\u26a0"]
-    _COL_WIDTHS  = [48, 220, 240, 110, 60, 155, 155, 120, 36]
+                    "Verpackt", "Abholbereit", "Ziel-Kiosk"]
+    _COL_WIDTHS  = [48, 220, 240, 110, 60, 155, 155, 120]
 
     _COLOR_TOUR1 = "#ccdaf5"   # blau – Tour 1
     _COLOR_TOUR2 = "#c4dfd0"   # grün – Tour 2
@@ -4062,7 +4073,6 @@ class PickupHeuteTab:
         self._last_load_date = None              # Datum des letzten erfolgreichen Loads
         self._refresh_job    = None              # after()-Job für Auto-Refresh
         self._all_rows       = []               # Alle geladenen Zeilen (leer bis erster Load)
-        self._t2_auto        = None             # Auto-erkannter T2-Cutoff "HH:MM" oder None
 
         self.frame = tk.Frame(parent)
 
@@ -4145,29 +4155,15 @@ class PickupHeuteTab:
         tk.Label(filter_row, text="Status:", font=("Segoe UI", 9)
                  ).pack(side="left")
         self._filter_var = tk.StringVar(value="Alle")
-        _status_opts = ["Alle", "Offen", "Verpackt", "Am Standort", "Abgeholt", "Retoure"]
+        _status_opts = ["Alle", "Offen", "Verpackt", "Am Standort", "Abgeholt", "Tour 1", "Tour 2"]
         _cb = ttk.Combobox(filter_row, textvariable=self._filter_var,
                            values=_status_opts, state="readonly",
                            font=("Segoe UI", 9), width=18)
         _cb.pack(side="left", padx=4)
         _cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_ui())
 
-        tk.Label(filter_row, text="Sortierung:", font=("Segoe UI", 9)
-                 ).pack(side="left", padx=(14, 0))
-        self._sort_var = tk.StringVar(value="Standard")
-        _sort_opts = [
-            "Standard",
-            "Name A→Z", "Name Z→A",
-            "Barcode A→Z",
-            "Verpackt (neu→alt)", "Verpackt (alt→neu)",
-            "Abholbereit (neu→alt)",
-            "Ziel-Kiosk A→Z",
-        ]
-        _sort_cb = ttk.Combobox(filter_row, textvariable=self._sort_var,
-                                values=_sort_opts, state="readonly",
-                                font=("Segoe UI", 9), width=20)
-        _sort_cb.pack(side="left", padx=4)
-        _sort_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_ui())
+        self._sort_col = None   # None = Standard, int = Spaltenindex
+        self._sort_dir = 0      # 0 = Standard, 1 = aufsteigend, 2 = absteigend
 
         self._all_rows: list = []   # vollständige Basis für Suche / Filter
 
@@ -4227,7 +4223,7 @@ class PickupHeuteTab:
                 show_x_scrollbar=True,
                 show_y_scrollbar=True,
             )
-            self._sheet.enable_bindings("single_select", "row_select", "copy", "column_width_resize")
+            self._sheet.enable_bindings("single_select", "row_select", "column_select", "copy", "column_width_resize")
             self._sheet.pack(fill="both", expand=True, padx=(4, 0), pady=(0, 6))
 
 
@@ -4235,7 +4231,10 @@ class PickupHeuteTab:
                 self._sheet.column_width(column=i, width=w)
 
             try:
-                self._sheet.extra_bindings([("cell_select", self._on_cell_click)])
+                self._sheet.extra_bindings([
+                    ("cell_select", self._on_cell_click),
+                    ("column_select", self._on_header_click),
+                ])
             except Exception:
                 pass
         except ImportError:
@@ -4264,43 +4263,63 @@ class PickupHeuteTab:
             pass
 
     # ── Tour-Abfahrt Steuerung ────────────────────────────────────────────
+    def _lese_netz_tour_zeiten(self):
+        """Liest tour_zeiten JSON direkt vom Netzlaufwerk (synchron). Gibt {} zurueck wenn nicht gefunden."""
+        import datetime as _dt, json as _json
+        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
+        pfad = TOURLISTEN_DIR / f"tour_zeiten_{heute}.json"
+        try:
+            if pfad.exists():
+                return _json.loads(pfad.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
     def _set_t1_abfahrt(self):
         import datetime as _dt
+        # Zuerst Netzlaufwerk pruefen – wer zuerst klickt gewinnt
+        netz = self._lese_netz_tour_zeiten()
+        if netz.get("t1"):
+            # anderer PC war schneller – dessen Daten uebernehmen
+            _save_tour_zeiten(netz.get("t1"), netz.get("t2"),
+                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []))
+            self._restore_tour_buttons()
+            self._recompute_tours_local()
+            return
         tz = _load_tour_zeiten()
         if tz.get("t1"):
             return
         jetzt = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%H:%M")
-        t1_barcodes = [r["barcode"] for r in self._all_rows]
+        t1_barcodes = [r["barcode"] for r in self._all_rows if r["tb_status"] == "Verpackt"]
         _save_tour_zeiten(t1=jetzt, t2=tz.get("t2"), t1_barcodes=t1_barcodes)
         self._restore_tour_buttons()
         self._recompute_tours_local()
         self._upload_tourliste("T1")
-        self._upload_tour_zeiten_to_drive()   # ← Kollegen-Sync: andere PCs sehen Tour 1 sofort
+        self._upload_tour_zeiten_to_drive()
 
     def _set_t2_abfahrt(self):
         import datetime as _dt
+        # Zuerst Netzlaufwerk pruefen – wer zuerst klickt gewinnt
+        netz = self._lese_netz_tour_zeiten()
+        if netz.get("t2"):
+            # anderer PC war schneller – dessen Daten uebernehmen
+            _save_tour_zeiten(netz.get("t1"), netz.get("t2"),
+                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []))
+            self._restore_tour_buttons()
+            self._recompute_tours_local()
+            return
         tz = _load_tour_zeiten()
         if tz.get("t2"):
             return
         jetzt = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%H:%M")
-        t1_bc = set(tz.get("t1_barcodes") or [])
+        # t1_barcodes vom Netzlaufwerk verwenden falls verfuegbar (konsistente Basis)
+        t1_bc = set(netz.get("t1_barcodes") or tz.get("t1_barcodes") or [])
         t2_barcodes = [r["barcode"] for r in self._all_rows if r["barcode"] not in t1_bc]
         _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=t2_barcodes)
         self._restore_tour_buttons()
         self._recompute_tours_local()
         self._upload_tourliste("T2")
-        self._upload_tour_zeiten_to_drive()   # ← Kollegen-Sync: andere PCs sehen Tour 2 sofort
-
-    def _get_or_create_tourlisten_folder(self) -> str:
-        if self.tourlisten_folder_id:
-            return self.tourlisten_folder_id
-        service = _get_oauth_drive_service()
-        metadata = {"name": "Tourlisten",
-                    "mimeType": "application/vnd.google-apps.folder"}
-        folder = service.files().create(body=metadata, fields="id").execute()
-        self.tourlisten_folder_id = folder["id"]
-        self.after(0, self._save_settings)
-        return self.tourlisten_folder_id
+        self._upload_tour_zeiten_to_drive()
 
     def _upload_tourliste(self, tour: str):
         import datetime as _dt, pandas as _pd
@@ -4308,33 +4327,73 @@ class PickupHeuteTab:
         tour_rows = [r for r in rows_all if r.get("tour") == tour]
         if not tour_rows:
             return
+        def _last4(v):
+            s = str(v).strip()
+            return s[-4:] if len(s) >= 4 else s
         df = _pd.DataFrame([{
-            "Paket-Barcode": r["barcode"],
-            "Name":          r["name"],
-            "Ziel-Kiosk":    r["zielkiosk"],
-            "Packstatus":    r["tb_status"],
-            "Verpackt_At":   r["verpackt_at"],
-            "Abholbereit_At": r["abholbereit_at"],
+            "Paket-Barcode":     r["barcode"],
+            "Bestellnummer":     _last4(r["barcode"]),
+            "Datum":             r["scan_datum"],
+            "Vorname":           "",
+            "Name":              r["name"],
+            "Ziel-Kiosk":        r["zielkiosk"],
+            "Status":            r["tb_status"],
+            "Bestellwert":       "",
+            "Versicher.":        "",
+            "Email":             "",
+            "Lieferung-Adresse": "",
+            "Lieferung":         "",
+            "Notizen":           "",
+            "Kontrollstatus":    r["tb_status"],
+            "Zahlung":           "",
+            "Rezept":            "",
         } for r in tour_rows])
-        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d_%H%M")
-        tour_nr = tour.replace("T", "")
-        filename = f"PU_Tour{tour_nr}_{heute}.xlsx"
+        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%d.%m.%Y")
+        tour_suffix = "A" if tour == "T1" else "B"
+        filename = f"Orca_Abholer_{heute}{tour_suffix}.xlsx"
 
         def worker():
             try:
-                folder_id = self._get_or_create_tourlisten_folder()
-                upload_excel_to_gdrive(df, folder_id, filename)
-                self.after(0, lambda: self._set_status(f"✅ Tourliste {tour} hochgeladen: {filename}"))
+                TOURLISTEN_DIR.mkdir(parents=True, exist_ok=True)
+                pfad = TOURLISTEN_DIR / filename
+                from openpyxl import Workbook as _WB
+                from openpyxl.styles import Font as _Fnt, PatternFill as _Fill, Alignment as _Aln, Border as _Brd, Side as _Side
+                from openpyxl.utils import get_column_letter as _gcl
+                import math as _math
+                wb = _WB()
+                ws = wb.active
+                cols = list(df.columns)
+                _thin = _Side(style='thin', color='BFBFBF')
+                _border = _Brd(left=_thin, right=_thin, top=_thin, bottom=_thin)
+                _col_w = [22, 14, 16, 10, 28, 13, 16, 13, 13, 28, 28, 12, 16, 15, 12, 10]
+                for ci, cn in enumerate(cols, 1):
+                    c = ws.cell(row=1, column=ci, value=cn)
+                    c.fill = _Fill('solid', start_color='4F81BD', end_color='4F81BD')
+                    c.font = _Fnt(name='Arial', bold=True, color='FFFFFF', size=10)
+                    c.alignment = _Aln(horizontal='center', vertical='center', wrap_text=True)
+                    c.border = _border
+                    ws.column_dimensions[_gcl(ci)].width = _col_w[ci - 1] if ci <= len(_col_w) else 15
+                ws.row_dimensions[1].height = 30
+                for ri, (_, row) in enumerate(df.iterrows(), 2):
+                    for ci, cn in enumerate(cols, 1):
+                        val = row[cn]
+                        if isinstance(val, float) and _math.isnan(val):
+                            val = None
+                        c = ws.cell(row=ri, column=ci, value=val)
+                        c.font = _Fnt(name='Arial', size=10)
+                        c.alignment = _Aln(vertical='center')
+                        c.border = _border
+                ws.freeze_panes = 'A2'
+                wb.save(pfad)
+                self.after(0, lambda: self._set_status(f"✅ Tourliste {tour} gespeichert: {pfad}"))
             except Exception as e:
-                self.after(0, lambda err=str(e): self._set_status(f"⚠ Tourliste-Upload fehlgeschlagen: {err}"))
+                self.after(0, lambda err=str(e): self._set_status(f"⚠ Tourliste-Speichern fehlgeschlagen: {err}"))
         threading.Thread(target=worker, daemon=True).start()
 
     def _restore_tour_buttons(self):
-        """Liest gespeicherte Abfahrtszeiten und aktualisiert Button-Farbe + Info-Label.
-        Zeigt an ob der Cutoff manuell gesetzt oder auto-erkannt wurde."""
+        """Liest gespeicherte Abfahrtszeiten und aktualisiert Button-Farbe + Info-Label."""
         tz = _load_tour_zeiten()
-        t1, t2_manual = tz.get("t1"), tz.get("t2")
-        t2_auto = getattr(self, "_t2_auto", None)
+        t1, t2 = tz.get("t1"), tz.get("t2")
 
         # Tour-1-Button
         if t1:
@@ -4345,13 +4404,9 @@ class PickupHeuteTab:
                                   activebackground="#3a7ac9")
 
         # Tour-2-Button
-        if t2_manual:
-            self.b_t2_los.config(text=f"🚐  Tour 2  \u2705 {t2_manual}", bg="#4ea874",
+        if t2:
+            self.b_t2_los.config(text=f"🚐  Tour 2  \u2705 {t2}", bg="#4ea874",
                                   activebackground="#3d8f63")
-        elif t2_auto:
-            # Auto-erkannt: orange als Hinweis dass es kein manueller Klick war
-            self.b_t2_los.config(text=f"🚐  Tour 2  \u23f1 {t2_auto} (Auto)", bg="#e8a44a",
-                                  activebackground="#d08830")
         else:
             self.b_t2_los.config(text="🚐  Tour 2 abgefahren", bg="#4a90d9",
                                   activebackground="#3a7ac9")
@@ -4360,66 +4415,55 @@ class PickupHeuteTab:
         lbl_parts = []
         if t1:
             lbl_parts.append(f"T1 ab {t1}")
-        if t2_manual:
-            lbl_parts.append(f"T2 ab {t2_manual}")
-        elif t2_auto:
-            lbl_parts.append(f"T2 ab {t2_auto} \u2139 auto")
+        if t2:
+            lbl_parts.append(f"T2 ab {t2}")
         self.tour_zeit_lbl.config(
             text="  \u00b7  ".join(lbl_parts) if lbl_parts else "Noch keine Abfahrt markiert",
-            fg="#27ae60" if t2_manual or t1 else ("#e8a44a" if t2_auto else "#888")
+            fg="#27ae60" if (t1 or t2) else "#888"
         )
 
     # \u2500\u2500 Tour-Zeiten Drive-Sync \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def _upload_tour_zeiten_to_drive(self):
         """L\u00e4dt die heutigen tour_zeiten als JSON nach Google Drive hoch (Hintergrund-Thread).
         So sehen andere Bombadil-Instanzen sofort welche Tour abgefahren ist."""
-        if not GDRIVE_AVAILABLE:
-            return
-        import datetime as _dt, threading as _th
+        import datetime as _dt, threading as _th, json as _json
         heute    = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         tz       = _load_tour_zeiten()
         def worker():
             try:
-                folder_id = self._get_or_create_tourlisten_folder()
-                upload_json_to_gdrive(tz, folder_id, filename)
-            except Exception:
-                pass
+                TOURLISTEN_DIR.mkdir(parents=True, exist_ok=True)
+                pfad = TOURLISTEN_DIR / filename
+                pfad.write_text(_json.dumps(tz, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._set_status(f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _sync_tour_zeiten_from_drive(self):
-        """Holt im Hintergrund die tour_zeiten-JSON aus Drive und merged sie mit den lokalen.
-        Wenn der Kollege Tour 1 gedr\u00fcckt hat, sehen wir das hier \u2013 ohne selbst klicken zu m\u00fcssen."""
-        folder_id = getattr(self, "tourlisten_folder_id", "")
-        if not folder_id or not GDRIVE_AVAILABLE:
-            return
-        import datetime as _dt, threading as _th
+        """Liest tour_zeiten-JSON vom Netzlaufwerk. Remote-Daten gewinnen immer."""
+        import datetime as _dt, threading as _th, json as _json
         heute    = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         def worker():
             try:
-                remote = download_json_from_gdrive(folder_id, filename)
-                if not remote:
+                pfad = TOURLISTEN_DIR / filename
+                if not pfad.exists():
+                    self.frame.after(0, lambda p=str(pfad): self._set_status(f"\u26a0 Sync: {p} nicht gefunden"))
                     return
-                local   = _load_tour_zeiten()
-                changed = False
-                if remote.get("t1") and not local.get("t1"):
-                    local["t1"]          = remote["t1"]
-                    local["t1_barcodes"] = remote.get("t1_barcodes", [])
-                    changed = True
-                if remote.get("t2") and not local.get("t2"):
-                    local["t2"]          = remote["t2"]
-                    local["t2_barcodes"] = remote.get("t2_barcodes", [])
-                    changed = True
-                if changed:
-                    _save_tour_zeiten(
-                        local.get("t1"), local.get("t2"),
-                        local.get("t1_barcodes"), local.get("t2_barcodes"),
-                    )
-                    self.frame.after(0, self._restore_tour_buttons)
-                    self.frame.after(0, self._recompute_tours_local)
-            except Exception:
-                pass
+                remote = _json.loads(pfad.read_text(encoding="utf-8"))
+                if not remote.get("t1") and not remote.get("t2"):
+                    return
+                # Remote-Daten immer anwenden (ueberschreiben lokale)
+                _save_tour_zeiten(
+                    remote.get("t1"), remote.get("t2"),
+                    remote.get("t1_barcodes", []), remote.get("t2_barcodes", []),
+                )
+                self.frame.after(0, self._restore_tour_buttons)
+                self.frame.after(0, self._recompute_tours_local)
+                self.frame.after(0, lambda t1=remote.get("t1"), t2=remote.get("t2"): self._set_status(
+                    f"\u2705 Tour-Sync: T1={t1 or '-'}  T2={t2 or '-'}"))
+            except Exception as e:
+                self.frame.after(0, lambda err=str(e): self._set_status(f"\u26a0 Sync-Fehler: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _recompute_tours_local(self):
@@ -4476,8 +4520,6 @@ class PickupHeuteTab:
                     _r["tour"] = "T1"
                 elif _bc in _t2_bc:
                     _r["tour"] = "T2"
-
-            diag["t2_auto"] = None
 
             self.frame.after(0, lambda r=rows, d=diag: self._apply(r, d))
         except Exception as e:
@@ -4546,8 +4588,6 @@ class PickupHeuteTab:
                 _status_fg   = "#e67e22"
 
         self.status_lbl.config(text=_status_text, fg=_status_fg)
-        if diag:
-            self._t2_auto = diag.get("t2_auto")
         self._restore_tour_buttons()   # Button-Status nach Laden aktualisieren
         self._sync_tour_zeiten_from_drive()  # Kollegen-Sync: Tour-Status von Drive holen
 
@@ -4577,8 +4617,10 @@ class PickupHeuteTab:
             rows = [r for r in rows if r["_abholbereit_bool"]]
         elif f == "Abgeholt":
             rows = [r for r in rows if r.get("db_status") == "abgeholt"]
-        elif f == "Retoure":
-            rows = [r for r in rows if r.get("db_status") == "retoure"]
+        elif f == "Tour 1":
+            rows = [r for r in rows if r.get("tour") == "T1"]
+        elif f == "Tour 2":
+            rows = [r for r in rows if r.get("tour") == "T2"]
         elif f == "Verpackt":
             rows = [r for r in rows if r["tb_status"].lower() == "verpackt"
                     and not r["_abholbereit_bool"]]
@@ -4586,23 +4628,18 @@ class PickupHeuteTab:
             rows = [r for r in rows if r["tb_status"].lower() == "offen"]
 
         # ── Sortierung ───────────────────────────────────────────────────
-        s = self._sort_var.get()
         _none_last = "ÿ"   # leere Strings nach hinten sortieren
-        if s == "Name A→Z":
-            rows = sorted(rows, key=lambda r: str(r["name"] or "").lower() or _none_last)
-        elif s == "Name Z→A":
-            rows = sorted(rows, key=lambda r: str(r["name"] or "").lower() or _none_last,
-                          reverse=True)
-        elif s == "Barcode A→Z":
-            rows = sorted(rows, key=lambda r: str(r["barcode"] or "").lower())
-        elif s == "Verpackt (neu→alt)":
-            rows = sorted(rows, key=lambda r: r["verpackt_at"] or "", reverse=True)
-        elif s == "Verpackt (alt→neu)":
-            rows = sorted(rows, key=lambda r: r["verpackt_at"] or _none_last)
-        elif s == "Abholbereit (neu→alt)":
-            rows = sorted(rows, key=lambda r: r["abholbereit_at"] or "", reverse=True)
-        elif s == "Ziel-Kiosk A→Z":
-            rows = sorted(rows, key=lambda r: str(r["zielkiosk"] or "").lower() or _none_last)
+        _col_keys = {
+            0: lambda r: str(r.get("tour", "") or "").lower(),
+            1: lambda r: str(r["barcode"] or "").lower(),
+            2: lambda r: str(r["name"] or "").lower() or _none_last,
+            3: lambda r: str(r["tb_status"] or "").lower(),
+            5: lambda r: str(r["verpackt_at"] or _none_last),
+            6: lambda r: str(r["abholbereit_at"] or _none_last),
+            7: lambda r: str(r["zielkiosk"] or "").lower() or _none_last,
+        }
+        if self._sort_col is not None and self._sort_dir > 0 and self._sort_col in _col_keys:
+            rows = sorted(rows, key=_col_keys[self._sort_col], reverse=(self._sort_dir == 2))
 
         # Standard: erst nach Prozessschritt (Offen → Verpackt → …), dann Tour
         def _tour_order(r):
@@ -4617,24 +4654,32 @@ class PickupHeuteTab:
             if r["tb_status"].lower() == "verpackt":    return 1
             return 0  # offen / nicht verpackt → ganz oben
 
-        if s == "Standard":
+        if self._sort_col is None or self._sort_dir == 0:
             rows = sorted(rows, key=lambda r: (_stage(r), _tour_order(r)))
-        else:
-            rows = sorted(rows, key=lambda r: (0 if not r["_in_db_bool"] else 1))
-
-        def _is_fehler(r):
-            return (r.get("tour") in ("T1", "T2")
-                    and not r["_abholbereit_bool"]
-                    and r.get("db_status") not in ("abgeholt", "retoure"))
 
         data = [
             [r.get("tour", ""), r["barcode"], r["name"], r["tb_status"], r["in_db"],
-             r["verpackt_at"], r["abholbereit_at"], r["zielkiosk"],
-             "\u26a0" if _is_fehler(r) else ""]
+             r["verpackt_at"], r["abholbereit_at"], r["zielkiosk"]]
             for r in rows
         ]
         self._last_data = data
         self._sheet.set_sheet_data(data)
+
+        # Kopfzeilen-Zaehler aktualisieren (Tour 1/2 immer aus _all_rows)
+        if self._all_rows:
+            _ar = self._all_rows
+            _n_ges = len(_ar)
+            _n_ab  = sum(1 for _r in _ar if _r["_abholbereit_bool"] or _r.get("db_status") == "abgeholt")
+            _n_vp  = sum(1 for _r in _ar if _r["tb_status"].lower() == "verpackt"
+                         and not _r["_abholbereit_bool"] and _r.get("db_status") != "abgeholt")
+            _n_of  = sum(1 for _r in _ar if _r["tb_status"].lower() == "offen")
+            _n_t1  = sum(1 for _r in _ar if _r.get("tour") == "T1")
+            _n_t2  = sum(1 for _r in _ar if _r.get("tour") == "T2")
+            self.count_lbl.config(text="  ·  ".join([
+                f"🚐 Tour 1: {_n_t1}  Tour 2: {_n_t2}",
+                f"{_n_ges} PUs", f"{_n_ab} angekommen",
+                f"{_n_vp} verpackt", f"{_n_of} offen",
+            ]))
 
         for i, r in enumerate(rows):
             # Zeilenfarbe nach Prozessstatus
