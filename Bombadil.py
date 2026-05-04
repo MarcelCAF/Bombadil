@@ -4343,21 +4343,44 @@ class PickupHeuteTab:
     def _set_kontrollstatus(self, r, new_status):
         """Setzt den Kontrollstatus einer Zeile in OrcaScan und aktualisiert die Anzeige."""
         import threading as _thr
+        import json as _json
+        import urllib.request as _urllib
+        import urllib.error   as _urllib_err
         self.status_lbl.config(
             text=f"⏳  Setze Packstatus auf '{new_status}' …", fg="#e67e22")
 
         def _worker():
-            result = update_rows_orca_bulk(
-                [(r["_tb_row_id"], r["barcode"], r["name"])],
-                {"Kontrollstatus": new_status},
-                sheet_id=ORCA_TAGESBOTE_SHEET_ID
-            )
-            self.frame.after(0, lambda: _done(result))
+            # Tagesboten-Sheet nutzt interne Kleinschreibung:
+            #   "name" statt "receipiantName", "kontrollstatus" statt "Kontrollstatus"
+            payload = {
+                "barcode":         r["barcode"],
+                "name":            r["name"],
+                "kontrollstatus":  new_status,
+            }
+            body = _json.dumps(payload).encode("utf-8")
+            url  = (f"{ORCA_BASE_URL}/sheets/{ORCA_TAGESBOTE_SHEET_ID}"
+                    f"/rows/{r['_tb_row_id']}?partial=true")
+            req  = _urllib.Request(url, data=body, method="PUT",
+                                   headers={"Authorization": f"Bearer {ORCA_API_KEY}",
+                                            "Content-Type": "application/json"})
+            err = None
+            try:
+                with _urllib.urlopen(req, timeout=15) as resp:
+                    resp.read()
+            except _urllib_err.HTTPError as e:
+                err = f"HTTP {e.code}"
+                try:
+                    err += ": " + e.read().decode("utf-8", errors="replace")[:200]
+                except Exception:
+                    pass
+            except Exception as ex:
+                err = str(ex)
+            self.frame.after(0, lambda: _done(err))
 
-        def _done(result):
-            if result["failed"]:
+        def _done(err):
+            if err:
                 self.status_lbl.config(
-                    text=f"❌  Fehler beim Setzen: {result['failed'][0][:60]}", fg="#c0392b")
+                    text=f"❌  Fehler beim Setzen: {err[:80]}", fg="#c0392b")
             else:
                 r["tb_status"] = new_status   # lokal sofort aktualisieren
                 self._refresh_ui()
