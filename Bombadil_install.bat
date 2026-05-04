@@ -28,6 +28,10 @@ echo [5/5] tksheet (Excel-artige Tabellen in Bombadil)...
 python -m pip install tksheet
 echo.
 
+echo [6/6] python-dotenv (Konfigurationsdatei .env)...
+python -m pip install python-dotenv
+echo.
+
 echo ============================================================
 echo  Fertig! Bombadil kann jetzt gestartet werden.
 echo ============================================================

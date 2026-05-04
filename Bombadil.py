@@ -188,15 +188,37 @@ COL_TB_ZIELKIOSK      = ["Ziel-Kiosk", "Ziel Kiosk", "Ziel_Kiosk", "Zielkiosk"]
 COL_TB_ZAHLUNG        = ["Zahlung"]
 
 # OrcaScan API Konfiguration (aus .env geladen)
-from dotenv import load_dotenv as _load_dotenv
 import os as _os
-_load_dotenv(dotenv_path=BASE_DIR / ".env")
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(dotenv_path=BASE_DIR / ".env")
+except ImportError:
+    # python-dotenv nicht installiert → automatisch nachinstallieren
+    import subprocess as _sp
+    _sp.run([_os.sys.executable if hasattr(_os, "sys") else "python", "-m", "pip", "install", "python-dotenv"], check=False)
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv(dotenv_path=BASE_DIR / ".env")
+    except Exception:
+        pass  # Notfall: Bombadil startet trotzdem, API-Calls schlagen fehl
+
+_env_missing = not (BASE_DIR / ".env").exists()
 ORCA_API_KEY             = _os.getenv("ORCA_API_KEY")
 ORCA_BASE_URL            = _os.getenv("ORCA_BASE_URL")
 ORCA_ABHOLER_SHEET_ID    = _os.getenv("ORCA_ABHOLER_SHEET_ID")    # Abholer_DB
 ORCA_DHL_NORMAL_SHEET_ID = _os.getenv("ORCA_DHL_NORMAL_SHEET_ID") # DHL_Normal
 ORCA_DHL_EX_SHEET_ID     = _os.getenv("ORCA_DHL_EX_SHEET_ID")     # DHL_Express
 ORCA_TAGESBOTE_SHEET_ID  = _os.getenv("ORCA_TAGESBOTE_SHEET_ID")  # Tagesbote
+
+if _env_missing:
+    import tkinter as _tk
+    from tkinter import messagebox as _mb
+    _r = _tk.Tk(); _r.withdraw()
+    _mb.showwarning("Konfiguration fehlt",
+        "Die Datei '.env' wurde nicht gefunden!\n\n"
+        "Bitte die .env-Datei in den Bombadil-Ordner legen.\n"
+        "(Bei Marcel oder IT erfragen)")
+    _r.destroy()
 
 # Feste Abfahrtszeiten der Tagesboten-Touren (Lokalzeit, UTC+1)
 TOUR_1_ABFAHRT = (11, 14)   # nur informativ
