@@ -4787,6 +4787,11 @@ class PickupHeuteTab:
                 f"{_n_vp} verpackt", f"{_n_of} offen",
             ]))
 
+        try:
+            self._sheet.dehighlight_all(redraw=False)
+        except Exception:
+            pass
+
         for i, r in enumerate(rows):
             # Zeilenfarbe nach Prozessstatus
             if r["_abholbereit_bool"]:
