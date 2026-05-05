@@ -3139,10 +3139,10 @@ class StatistikTab:
             if h:
                 c.create_rectangle(x_l, base_y - h, x_r, base_y,
                                    fill=self._COL_ANLIEF, outline="")
-                if bar_w >= 8 and h >= 10:
-                    c.create_text((x_l + x_r) // 2, base_y - h - 2,
-                                  text=str(n_anlief), anchor="s",
-                                  font=("Segoe UI", 7), fill="#117a65")
+            if n_anlief and bar_w >= 5:
+                c.create_text((x_l + x_r) // 2, min(base_y - h - 2, base_y - 4),
+                              text=str(n_anlief), anchor="s",
+                              font=("Segoe UI", 7), fill="#117a65")
 
             # X-Achsen-Labels: Wochentag (oben) + Datum (unten)
             wt_txt = _WOCHENTAGE[weekday]
@@ -3416,10 +3416,6 @@ class StatistikTab:
             if h1:
                 c.create_rectangle(x1_l, base_y - h1, x1_r, base_y,
                                    fill=self._COL_NORMAL, outline="")
-                if bar_w >= 8 and h1 >= 10:
-                    c.create_text((x1_l + x1_r) // 2, base_y - h1 - 2,
-                                  text=str(n_normal), anchor="s",
-                                  font=("Segoe UI", 7), fill="#f57f17")
 
             # Bar 2: DHL Express
             x2_l = x1_r + bar_gap
@@ -3429,10 +3425,6 @@ class StatistikTab:
             if h2:
                 c.create_rectangle(x2_l, base_y - h2, x2_r, base_y,
                                    fill=self._COL_EXPRESS, outline="")
-                if bar_w >= 8 and h2 >= 10:
-                    c.create_text((x2_l + x2_r) // 2, base_y - h2 - 2,
-                                  text=str(n_express), anchor="s",
-                                  font=("Segoe UI", 7), fill="#7f0000")
 
             # Bar 3: Abholung
             x3_l = x2_r + bar_gap
@@ -3442,10 +3434,15 @@ class StatistikTab:
             if h3:
                 c.create_rectangle(x3_l, base_y - h3, x3_r, base_y,
                                    fill=self._COL_ABHOLUNG, outline="")
-                if bar_w >= 8 and h3 >= 10:
-                    c.create_text((x3_l + x3_r) // 2, base_y - h3 - 2,
-                                  text=str(n_abholung), anchor="s",
-                                  font=("Segoe UI", 7), fill="#1b5e20")
+
+            # Tages-Gesamtzahl über der Gruppe
+            n_total = n_normal + n_express + n_abholung
+            if n_total:
+                max_h = max(h1, h2, h3)
+                x_mid = (x1_l + x3_r) // 2
+                c.create_text(x_mid, min(base_y - max_h - 3, base_y - 4),
+                              text=str(n_total), anchor="s",
+                              font=("Segoe UI", 7), fill="#444")
 
             is_mo = weekday == 0
             c.create_text(gx, base_y + 4, text=_WOCHENTAGE[weekday], anchor="n",
