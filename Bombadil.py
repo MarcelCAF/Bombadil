@@ -529,7 +529,8 @@ def compute_all_rows(source):
                     wt = ""
             else:
                 wt = "?"
-            out.append((bc, dt_str, nm, zk, wt))
+            oid = "" if "_id" not in r.index or pd.isna(r["_id"]) else str(r["_id"]).strip()
+            out.append((bc, dt_str, nm, zk, wt, oid))   # oid an Index 5 (versteckt)
         return out
 
     def rows_older7(dfx):
@@ -1914,15 +1915,19 @@ class TableTab:
     """
 
     def __init__(self, parent, title: str, columns: list[tuple[str, str, int]],
-                 today_header: bool = False, row_color_fn=None):
+                 today_header: bool = False, row_color_fn=None,
+                 editable_col_map=None, orca_sheet_id=None, orca_id_idx=None):
         try:
             from tksheet import Sheet as _Sheet
         except ImportError:
             _Sheet = None
 
-        self.columns      = columns
-        self.today_header = today_header
-        self._Sheet       = _Sheet
+        self.columns             = columns
+        self.today_header        = today_header
+        self._Sheet              = _Sheet
+        self._editable_col_map   = editable_col_map or {}
+        self._orca_sheet_id      = orca_sheet_id
+        self._orca_id_idx        = orca_id_idx
 
         self.frame = tk.Frame(parent)
 
@@ -1969,7 +1974,10 @@ class TableTab:
             except Exception:
                 pass
             try:
-                self.sheet.extra_bindings([("cell_select", self._on_cell_click)])
+                self.sheet.extra_bindings([
+                    ("cell_select",   self._on_cell_click),
+                    ("end_edit_cell", self._on_cell_edited),
+                ])
             except Exception:
                 pass
         else:
@@ -2050,6 +2058,55 @@ class TableTab:
                     self.count_lbl.config(text=f"📋 Kopiert: {barcode[:28]}", fg="#27ae60")
                     self.frame.after(1800, lambda: self.count_lbl.config(
                         text=orig, fg="black"))
+        except Exception:
+            pass
+
+    def _on_cell_edited(self, event):
+        """Zell-Bearbeitung → OrcaScan aktualisieren (nur für konfigurierte Spalten)."""
+        import threading as _thr
+        try:
+            col_idx = event.column
+            row_idx = event.row
+            if (col_idx not in self._editable_col_map
+                    or not self._orca_sheet_id
+                    or self._orca_id_idx is None):
+                return
+            if row_idx >= len(self.filtered):
+                return
+            raw_row = self.filtered[row_idx]
+            row_id  = raw_row[self._orca_id_idx]
+            barcode = raw_row[0]
+            name    = raw_row[2]
+            if not row_id or not barcode:
+                return
+            try:
+                new_val = str(event.value).strip()
+            except Exception:
+                new_val = str(self.sheet.get_cell_data(row_idx, col_idx) or "").strip()
+            orca_field = self._editable_col_map[col_idx]
+            # Lokal sofort aktualisieren
+            lst = list(raw_row)
+            lst[col_idx] = new_val
+            new_row = tuple(lst)
+            self.filtered[row_idx] = new_row
+            try:
+                idx = self.rows.index(raw_row)
+                self.rows[idx] = new_row
+            except ValueError:
+                pass
+            # OrcaScan im Hintergrund aktualisieren
+            def _send():
+                update_rows_orca_bulk(
+                    [(row_id, barcode, name)],
+                    {orca_field: new_val},
+                    sheet_id=self._orca_sheet_id
+                )
+            _thr.Thread(target=_send, daemon=True).start()
+            # Kurze Bestätigung im count_lbl
+            orig = self.count_lbl.cget("text")
+            self.count_lbl.config(
+                text=f"✓ Gespeichert: {new_val[:25]}", fg="#27ae60")
+            self.frame.after(2500, lambda: self.count_lbl.config(text=orig, fg="black"))
         except Exception:
             pass
 
@@ -5377,6 +5434,9 @@ class App(tk.Tk):
             [("barcode", "Paket-Barcode", 230), ("dt", "Abholbereit_At", 175),
              ("name", "Name", 400), ("kiosk", "Ziel-Kiosk", 130), ("wt", "Wartezeit", 90)],
             row_color_fn=_abhol_color,
+            editable_col_map={3: "zielu002dkiosk"},
+            orca_sheet_id=ORCA_ABHOLER_SHEET_ID,
+            orca_id_idx=5,
         )
         self.nb.add(self.tab_abhol.frame, text="  Abholbereit  ")
 
@@ -5459,6 +5519,9 @@ class App(tk.Tk):
              ("name", "Name", 380), ("zahlung", "Zahlung", 160),
              ("bw", "Bestellwert", 120), ("wt", "Wartezeit", 90)],
             row_color_fn=_pay_color,
+            editable_col_map={3: "zahlung", 4: "bestellwert"},
+            orca_sheet_id=ORCA_ABHOLER_SHEET_ID,
+            orca_id_idx=6,
         )
         self.nb.add(self.tab_pay.frame, text="  Zahlung offen  ")
 
