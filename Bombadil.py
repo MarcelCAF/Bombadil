@@ -1428,12 +1428,19 @@ def compute_pickup_heute(abholer_df: "pd.DataFrame", tagesbote_df: "pd.DataFrame
         _abholbereit_bool = False
         db_status         = ""   # normalisierter Paketstatus aus Abholer_DB
         tour              = ""   # "T1" | "T2" | "" (wird im in_db-Block gesetzt)
+        db_id             = ""   # OrcaScan _id aus Abholer_DB (für manuelle Updates)
 
         if db_lookup is not None and bc in db_lookup.index:
             in_db  = True
             row_db = db_lookup.loc[bc]
             if isinstance(row_db, pd.DataFrame):
                 row_db = row_db.iloc[0]
+            # _id für spätere API-Updates mitspeichern
+            if "_id" in db_lookup.columns:
+                _raw_db_id = db_lookup.loc[bc, "_id"]
+                if isinstance(_raw_db_id, pd.Series):
+                    _raw_db_id = _raw_db_id.iloc[0]
+                db_id = "" if pd.isna(_raw_db_id) else str(_raw_db_id).strip()
 
             def _get_db(col):
                 if not col or col not in db_lookup.columns:
@@ -1482,7 +1489,8 @@ def compute_pickup_heute(abholer_df: "pd.DataFrame", tagesbote_df: "pd.DataFrame
             "zielkiosk":         zk,
             "tour":              tour,
             "_tb_row_id":        tb_row_id,
-            "_raw_vp":           _raw_vp,   # Roh-Timestamp für Live-Tour-Neuberechnung
+            "_db_id":            db_id,
+            "_raw_vp":           _raw_vp,
         })
 
     diag = {
@@ -4157,13 +4165,16 @@ class PickupHeuteTab:
 
     PU_REFRESH_INTERVAL_MS = 2 * 60 * 1000   # 2 Minuten
 
-    def __init__(self, parent, get_abholer_df=None, on_count_change=None):
-        self.get_abholer_df  = get_abholer_df
-        self._loading        = False
-        self.on_count_change = on_count_change   # Callback(n) → Kachel im Report aktualisieren
-        self._last_load_date = None              # Datum des letzten erfolgreichen Loads
-        self._refresh_job    = None              # after()-Job für Auto-Refresh
-        self._all_rows       = []               # Alle geladenen Zeilen (leer bis erster Load)
+    def __init__(self, parent, get_abholer_df=None, on_count_change=None,
+                 get_export_folder=None):
+        self.get_abholer_df   = get_abholer_df
+        self.get_export_folder = get_export_folder
+        self._loading         = False
+        self.on_count_change  = on_count_change   # Callback(n) → Kachel im Report aktualisieren
+        self._last_load_date  = None              # Datum des letzten erfolgreichen Loads
+        self._refresh_job     = None              # after()-Job für Auto-Refresh
+        self._all_rows        = []                # Alle geladenen Zeilen (leer bis erster Load)
+        self._tb_panel_visible = False
 
         self.frame = tk.Frame(parent)
 
@@ -4191,6 +4202,12 @@ class PickupHeuteTab:
             btn_row, text="🔄  Jetzt laden", command=self._run
         )
         self.b_laden.pack(side="left")
+
+        self.b_tagesbote = tk.Button(
+            btn_row, text="📋  Tagesbote ▶",
+            command=self._toggle_tagesbote_panel
+        )
+        self.b_tagesbote.pack(side="left", padx=(6, 0))
 
         self.status_lbl = tk.Label(
             btn_row, text="Noch nicht geladen.",
@@ -4261,6 +4278,18 @@ class PickupHeuteTab:
         # ── Hauptbereich: Tabelle + Legende nebeneinander ────────────────
         body = tk.Frame(self.frame)
         body.pack(fill="both", expand=True)
+        self._body = body   # Referenz für Toggle-Panel
+
+        # ── Tagesboten-Seitenpanel (rechts, zunächst versteckt) ──────────
+        self._tb_panel = tk.Frame(body, bd=1, relief="groove", width=430)
+        self._tb_panel.pack_propagate(False)
+        self._tb_abgleich = TagesbotenAbgleichTab(
+            self._tb_panel,
+            get_abholer_df    = self.get_abholer_df,
+            get_export_folder = self.get_export_folder,
+        )
+        self._tb_abgleich.frame.pack(fill="both", expand=True)
+        # Panel bleibt zunächst versteckt (kein pack-Aufruf)
 
         # ── Legende (rechts, feste Breite) ───────────────────────────────
         legend = tk.Frame(body, bg="#f5f5f5", bd=1, relief="groove", width=170)
@@ -4374,21 +4403,37 @@ class PickupHeuteTab:
         if row_idx >= len(disp):
             return
         r = disp[row_idx]
-        if not r.get("_tb_row_id"):
-            return   # kein Tagesboten-Eintrag → kein Menü
 
         menu = tk.Menu(self.frame, tearoff=0)
-        already_vp = r["tb_status"].lower() == "verpackt"
-        menu.add_command(
-            label="✓  Verpackt setzen",
-            state="disabled" if already_vp else "normal",
-            command=lambda: self._set_kontrollstatus(r, "Verpackt")
-        )
-        menu.add_command(
-            label="○  Offen setzen",
-            state="disabled" if not already_vp else "normal",
-            command=lambda: self._set_kontrollstatus(r, "Offen")
-        )
+
+        # ── Packstatus (Tagesboten-Sheet) ──────────────────────────────
+        if r.get("_tb_row_id"):
+            already_vp = r["tb_status"].lower() == "verpackt"
+            menu.add_command(
+                label="✓  Verpackt setzen",
+                state="disabled" if already_vp else "normal",
+                command=lambda: self._set_kontrollstatus(r, "Verpackt")
+            )
+            menu.add_command(
+                label="○  Offen setzen",
+                state="disabled" if not already_vp else "normal",
+                command=lambda: self._set_kontrollstatus(r, "Offen")
+            )
+
+        # ── Abholbereit (Abholer_DB) ────────────────────────────────────
+        if r.get("_db_id"):
+            if r.get("_tb_row_id"):
+                menu.add_separator()
+            already_ab = r["_abholbereit_bool"]
+            menu.add_command(
+                label="📦  Abholbereit setzen",
+                state="disabled" if already_ab else "normal",
+                command=lambda: self._set_abholbereit_single(r)
+            )
+
+        if menu.index("end") is None:
+            return   # leeres Menü → nicht anzeigen
+
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -4440,6 +4485,51 @@ class PickupHeuteTab:
                 self._refresh_ui()
                 self.status_lbl.config(
                     text=f"✓  Packstatus '{new_status}' gesetzt – {r['barcode']}", fg="#27ae60")
+
+        _thr.Thread(target=_worker, daemon=True).start()
+
+    def _toggle_tagesbote_panel(self):
+        """Tagesboten-Seitenpanel ein-/ausklappen."""
+        if self._tb_panel_visible:
+            self._tb_panel.pack_forget()
+            self._tb_panel_visible = False
+            self.b_tagesbote.config(text="📋  Tagesbote ▶")
+        else:
+            self._tb_panel.pack(in_=self._body, side="right",
+                                fill="y", padx=(4, 0), pady=(0, 6))
+            self._tb_panel_visible = True
+            self.b_tagesbote.config(text="◀  Tagesbote")
+
+    def _set_abholbereit_single(self, r):
+        """Einzelne Zeile per Rechtsklick auf Abholbereit setzen."""
+        import threading as _thr
+        from datetime import datetime, timezone as _tz
+
+        self.status_lbl.config(
+            text=f"⏳  Setze '{r['barcode']}' auf Abholbereit …", fg="#e67e22")
+
+        def _worker():
+            ts     = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            result = update_rows_orca_bulk(
+                [(r["_db_id"], r["barcode"], r["name"])],
+                {"location": "Abholbereit", "abholbereitu005fat": ts}
+            )
+            self.frame.after(0, lambda: _done(result, ts))
+
+        def _done(result, ts):
+            if result["failed"]:
+                self.status_lbl.config(
+                    text=f"❌  Fehler: {result['failed'][0][:60]}", fg="#c0392b")
+            else:
+                # Lokal sofort aktualisieren
+                for row in self._all_rows:
+                    if row["barcode"] == r["barcode"]:
+                        row["_abholbereit_bool"] = True
+                        row["abholbereit_at"]    = ts[:10]
+                        row["db_status"]         = "abholbereit"
+                self._refresh_ui()
+                self.status_lbl.config(
+                    text=f"✓  '{r['barcode']}' auf Abholbereit gesetzt", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
@@ -5412,6 +5502,7 @@ class App(tk.Tk):
             self.nb,
             get_abholer_df    = lambda: self.last_abholer_df,
             on_count_change   = self._on_pu_count_change,
+            get_export_folder = lambda: self.export_folder,
         )
         self.nb.add(self.tab_pickup_heute.frame, text="  Pickup heute  ")
 
