@@ -76,9 +76,9 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 
-GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/main"
+GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
 def check_for_update():
     """Prüft beim Start ob eine neuere Version auf GitHub verfügbar ist.
