@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4536,36 +4536,53 @@ class PickupHeuteTab:
         _thr.Thread(target=_worker, daemon=True).start()
 
     def _delete_from_db(self, r):
-        """Zeile per Rechtsklick aus der Abholer_DB löschen (mit Bestätigung)."""
+        """Zeile per Rechtsklick aus Abholer_DB und ggf. Tagesboten-Sheet löschen."""
         import threading as _thr
         from tkinter import messagebox
 
+        has_db = bool(r.get("_db_id"))
+        has_tb = bool(r.get("_tb_row_id"))
+
+        sheets = []
+        if has_db:
+            sheets.append("Abholer_DB")
+        if has_tb:
+            sheets.append("Tagesboten-Sheet")
+        sheets_txt = " und ".join(sheets)
+
         if not messagebox.askyesno(
-            "Aus Abholer_DB löschen",
-            f"Paket '{r['barcode']}' ({r['name']}) wirklich aus der Abholer_DB löschen?\n\n"
+            "Löschen bestätigen",
+            f"Paket '{r['barcode']}' ({r['name']}) wirklich aus {sheets_txt} löschen?\n\n"
             "Diese Aktion kann nicht rückgängig gemacht werden."
         ):
             return
 
         self.status_lbl.config(
-            text=f"⏳  Lösche '{r['barcode']}' aus Abholer_DB …", fg="#e67e22")
+            text=f"⏳  Lösche '{r['barcode']}' …", fg="#e67e22")
 
         def _worker():
-            result = delete_rows_orca_bulk([r["_db_id"]])
-            self.frame.after(0, lambda: _done(result))
+            errors = []
+            if has_db:
+                res = delete_rows_orca_bulk([r["_db_id"]], sheet_id=ORCA_ABHOLER_SHEET_ID)
+                if res["failed"]:
+                    errors.append(f"Abholer_DB: {res['errors'][0][:50] if res['errors'] else 'Fehler'}")
+            if has_tb:
+                res = delete_rows_orca_bulk([r["_tb_row_id"]], sheet_id=ORCA_TAGESBOTE_SHEET_ID)
+                if res["failed"]:
+                    errors.append(f"Tagesbote: {res['errors'][0][:50] if res['errors'] else 'Fehler'}")
+            self.frame.after(0, lambda: _done(errors))
 
-        def _done(result):
-            if result["failed"]:
+        def _done(errors):
+            if errors:
                 self.status_lbl.config(
-                    text=f"❌  Löschen fehlgeschlagen: {result['errors'][0][:60] if result['errors'] else ''}",
-                    fg="#c0392b")
+                    text=f"❌  Fehler: {' | '.join(errors)}", fg="#c0392b")
             else:
-                # Lokal sofort aus der Liste entfernen
                 self._all_rows = [row for row in self._all_rows
-                                  if row.get("_db_id") != r["_db_id"]]
+                                  if row.get("_db_id") != r.get("_db_id")
+                                  and row.get("barcode") != r["barcode"]]
                 self._refresh_ui()
                 self.status_lbl.config(
-                    text=f"✓  '{r['barcode']}' gelöscht", fg="#27ae60")
+                    text=f"✓  '{r['barcode']}' aus {sheets_txt} gelöscht", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
