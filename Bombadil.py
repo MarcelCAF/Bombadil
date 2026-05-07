@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.14"
+VERSION = "1.0.15"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -125,8 +125,8 @@ def check_for_update():
             neue_version = r.read()
         eigene_datei.write_bytes(neue_version)
         # Bombadil neu starten
-        subprocess.Popen([sys.executable, str(eigene_datei)])
-        sys.exit()
+        subprocess.Popen([_sys.executable, str(eigene_datei)])
+        _sys.exit()
     except Exception as e:
         import tkinter as tk
         from tkinter import messagebox
