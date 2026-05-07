@@ -76,30 +76,19 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.0"
+VERSION = "1.0.10"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/main"
 
 def check_for_update():
     """Prüft beim Start ob eine neuere Version auf GitHub verfügbar ist.
-    Auf Netzlaufwerken (NAS) wird der Update-Check übersprungen."""
+    Funktioniert auch auf Netzlaufwerken (NAS) – die Datei wird direkt
+    am Speicherort (NAS-Pfad) aktualisiert."""
     import urllib.request
     import shutil
     import subprocess
 
-    # Netzlaufwerk erkennen – kein Auto-Update auf NAS (mehrere Nutzer!)
     eigene_datei = Path(__file__).resolve()
-    if str(eigene_datei).startswith("\\\\") or (len(str(eigene_datei)) > 1 and not eigene_datei.drive.endswith(":")):
-        return  # Netzwerkpfad → überspringen
-    # Windows-Netzlaufwerke die als Laufwerksbuchstabe eingebunden sind (z.B. W:\)
-    try:
-        import subprocess as _sp
-        drive = eigene_datei.drive  # z.B. "W:"
-        result = _sp.run(["net", "use", drive], capture_output=True, text=True)
-        if result.returncode == 0:
-            return  # Netzlaufwerk → überspringen
-    except Exception:
-        pass
 
     try:
         with urllib.request.urlopen(f"{GITHUB_RAW}/version.txt", timeout=5) as r:
