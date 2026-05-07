@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/main"
 
@@ -218,7 +218,7 @@ import json as _json_mod
 
 def _tour_zeiten_pfad():
     import datetime as _dt_tz
-    heute = (_dt_tz.datetime.utcnow() + _dt_tz.timedelta(hours=2)).strftime("%Y-%m-%d")
+    heute = (_dt_tz.datetime.now()).strftime("%Y-%m-%d")
     return BASE_DIR / f"tour_zeiten_{heute}.json"
 
 def _load_tour_zeiten() -> dict:
@@ -4534,7 +4534,7 @@ class PickupHeuteTab:
     def _lese_netz_tour_zeiten(self):
         """Liest tour_zeiten JSON direkt vom Netzlaufwerk (synchron). Gibt {} zurueck wenn nicht gefunden."""
         import datetime as _dt, json as _json
-        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
+        heute = (_dt.datetime.now()).strftime("%Y-%m-%d")
         pfad = TOURLISTEN_DIR / f"tour_zeiten_{heute}.json"
         try:
             if pfad.exists():
@@ -4557,7 +4557,7 @@ class PickupHeuteTab:
         tz = _load_tour_zeiten()
         if tz.get("t1"):
             return
-        jetzt = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%H:%M")
+        jetzt = (_dt.datetime.now()).strftime("%H:%M")
         t1_barcodes = [r["barcode"] for r in self._all_rows if r["tb_status"] == "Verpackt"]
         _save_tour_zeiten(t1=jetzt, t2=tz.get("t2"), t1_barcodes=t1_barcodes)
         self._restore_tour_buttons()
@@ -4579,7 +4579,7 @@ class PickupHeuteTab:
         tz = _load_tour_zeiten()
         if tz.get("t2"):
             return
-        jetzt = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%H:%M")
+        jetzt = (_dt.datetime.now()).strftime("%H:%M")
         # t1_barcodes vom Netzlaufwerk verwenden falls verfuegbar (konsistente Basis)
         t1_bc = set(netz.get("t1_barcodes") or tz.get("t1_barcodes") or [])
         t2_barcodes = [r["barcode"] for r in self._all_rows if r["barcode"] not in t1_bc]
@@ -4616,7 +4616,7 @@ class PickupHeuteTab:
             "Zahlung":           "",
             "Rezept":            "",
         } for r in tour_rows])
-        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%d.%m.%Y")
+        heute = (_dt.datetime.now()).strftime("%d.%m.%Y")
         tour_suffix = "A" if tour == "T1" else "B"
         filename = f"Orca_Abholer_{heute}{tour_suffix}.xlsx"
 
@@ -4653,9 +4653,9 @@ class PickupHeuteTab:
                         c.border = _border
                 ws.freeze_panes = 'A2'
                 wb.save(pfad)
-                self.after(0, lambda: self._set_status(f"✅ Tourliste {tour} gespeichert: {pfad}"))
+                self.frame.after(0, lambda: self.status_lbl.config(text=f"✅ Tourliste {tour} gespeichert: {pfad}"))
             except Exception as e:
-                self.after(0, lambda err=str(e): self._set_status(f"⚠ Tourliste-Speichern fehlgeschlagen: {err}"))
+                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"⚠ Tourliste-Speichern fehlgeschlagen: {err}"))
         threading.Thread(target=worker, daemon=True).start()
 
     def _restore_tour_buttons(self):
@@ -4695,7 +4695,7 @@ class PickupHeuteTab:
         """L\u00e4dt die heutigen tour_zeiten als JSON nach Google Drive hoch (Hintergrund-Thread).
         So sehen andere Bombadil-Instanzen sofort welche Tour abgefahren ist."""
         import datetime as _dt, threading as _th, json as _json
-        heute    = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
+        heute    = (_dt.datetime.now()).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         tz       = _load_tour_zeiten()
         def worker():
@@ -4704,19 +4704,18 @@ class PickupHeuteTab:
                 pfad = TOURLISTEN_DIR / filename
                 pfad.write_text(_json.dumps(tz, ensure_ascii=False), encoding="utf-8")
             except Exception as e:
-                self.after(0, lambda err=str(e): self._set_status(f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
+                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _sync_tour_zeiten_from_drive(self):
         """Liest tour_zeiten-JSON vom Netzlaufwerk. Remote-Daten gewinnen immer."""
         import datetime as _dt, threading as _th, json as _json
-        heute    = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
+        heute    = (_dt.datetime.now()).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         def worker():
             try:
                 pfad = TOURLISTEN_DIR / filename
                 if not pfad.exists():
-                    self.frame.after(0, lambda p=str(pfad): self._set_status(f"\u26a0 Sync: {p} nicht gefunden"))
                     return
                 remote = _json.loads(pfad.read_text(encoding="utf-8"))
                 if not remote.get("t1") and not remote.get("t2"):
@@ -4728,10 +4727,10 @@ class PickupHeuteTab:
                 )
                 self.frame.after(0, self._restore_tour_buttons)
                 self.frame.after(0, self._recompute_tours_local)
-                self.frame.after(0, lambda t1=remote.get("t1"), t2=remote.get("t2"): self._set_status(
-                    f"\u2705 Tour-Sync: T1={t1 or '-'}  T2={t2 or '-'}"))
+                self.frame.after(0, lambda t1=remote.get("t1"), t2=remote.get("t2"): self.status_lbl.config(
+                    text=f"\u2705 Tour-Sync: T1={t1 or '-'}  T2={t2 or '-'}"))
             except Exception as e:
-                self.frame.after(0, lambda err=str(e): self._set_status(f"\u26a0 Sync-Fehler: {err}"))
+                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"\u26a0 Sync-Fehler: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _recompute_tours_local(self):
@@ -4798,12 +4797,12 @@ class PickupHeuteTab:
         self._loading = False
         self.b_laden.config(state="normal")
 
-        heute_str = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%d.%m.%Y")
+        heute_str = (_dt.datetime.now()).strftime("%d.%m.%Y")
         self.title_lbl.config(text=f"🚐  PU heute – {heute_str}")
 
         if not rows:
             import datetime as _dt2
-            today_local = (_dt2.datetime.utcnow() + _dt2.timedelta(hours=2)).date()
+            today_local = (_dt2.datetime.now()).date()
             same_day = (self._last_load_date == today_local)
             had_data = bool(getattr(self, "_last_rows", None)) and same_day
             if had_data:
@@ -4836,7 +4835,7 @@ class PickupHeuteTab:
                   f"{n_gesamt} PUs", f"{n_abholbereit} angekommen",
                   f"{n_verpackt} verpackt", f"{n_offen} offen"]
         self.count_lbl.config(text="  ·  ".join(_parts))
-        _uhrzeit = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%H:%M")
+        _uhrzeit = (_dt.datetime.now()).strftime("%H:%M")
         _status_text = f"✅  Zuletzt geladen: {_uhrzeit} Uhr"
         _status_fg   = "#28a745"
 
@@ -4863,7 +4862,7 @@ class PickupHeuteTab:
             self._all_rows  = rows   # vollständige Basis für Suche / Filter
             self._last_rows = rows   # für Report-Kachel-Detail (Panel D)
             import datetime as _dt2
-            self._last_load_date = (_dt2.datetime.utcnow() + _dt2.timedelta(hours=2)).date()
+            self._last_load_date = (_dt2.datetime.now()).date()
             self._refresh_ui()
         self._schedule_refresh()
 
@@ -5020,7 +5019,7 @@ class PickupHeuteTab:
             messagebox.showinfo("Export", f"Keine Pakete für {tour} vorhanden.")
             return
 
-        heute = (_dt.datetime.utcnow() + _dt.timedelta(hours=2)).strftime("%Y-%m-%d")
+        heute = (_dt.datetime.now()).strftime("%Y-%m-%d")
         tour_nr = tour.replace("T", "")
         default_name = f"PU_Tour{tour_nr}_{heute}.xlsx"
 
