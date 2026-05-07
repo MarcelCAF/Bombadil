@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.12"
+VERSION = "1.0.13"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4409,7 +4409,7 @@ class PickupHeuteTab:
                 command=lambda: self._set_kontrollstatus(r, "Offen")
             )
 
-        # ── Abholbereit (Abholer_DB) ────────────────────────────────────
+        # ── Abholbereit + Löschen (Abholer_DB) ─────────────────────────
         if r.get("_db_id"):
             if r.get("_tb_row_id"):
                 menu.add_separator()
@@ -4418,6 +4418,11 @@ class PickupHeuteTab:
                 label="📦  Abholbereit setzen",
                 state="disabled" if already_ab else "normal",
                 command=lambda: self._set_abholbereit_single(r)
+            )
+            menu.add_separator()
+            menu.add_command(
+                label="🗑️  Aus Abholer_DB löschen",
+                command=lambda: self._delete_from_db(r)
             )
 
         if menu.index("end") is None:
@@ -4527,6 +4532,40 @@ class PickupHeuteTab:
                 self._refresh_ui()
                 self.status_lbl.config(
                     text=f"✓  '{r['barcode']}' auf Abholbereit gesetzt", fg="#27ae60")
+
+        _thr.Thread(target=_worker, daemon=True).start()
+
+    def _delete_from_db(self, r):
+        """Zeile per Rechtsklick aus der Abholer_DB löschen (mit Bestätigung)."""
+        import threading as _thr
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Aus Abholer_DB löschen",
+            f"Paket '{r['barcode']}' ({r['name']}) wirklich aus der Abholer_DB löschen?\n\n"
+            "Diese Aktion kann nicht rückgängig gemacht werden."
+        ):
+            return
+
+        self.status_lbl.config(
+            text=f"⏳  Lösche '{r['barcode']}' aus Abholer_DB …", fg="#e67e22")
+
+        def _worker():
+            result = delete_rows_orca_bulk([r["_db_id"]])
+            self.frame.after(0, lambda: _done(result))
+
+        def _done(result):
+            if result["failed"]:
+                self.status_lbl.config(
+                    text=f"❌  Löschen fehlgeschlagen: {result['errors'][0][:60] if result['errors'] else ''}",
+                    fg="#c0392b")
+            else:
+                # Lokal sofort aus der Liste entfernen
+                self._all_rows = [row for row in self._all_rows
+                                  if row.get("_db_id") != r["_db_id"]]
+                self._refresh_ui()
+                self.status_lbl.config(
+                    text=f"✓  '{r['barcode']}' gelöscht", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
