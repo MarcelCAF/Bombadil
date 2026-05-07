@@ -4495,8 +4495,16 @@ class PickupHeuteTab:
             self._tb_panel_visible = False
             self.b_tagesbote.config(text="📋  Tagesbote ▶")
         else:
+            # Sheet kurz entfernen, damit der Pack-Manager Platz neu verteilt.
+            # (Das Sheet hat expand=True und hat sonst bereits den ganzen Platz
+            #  beansprucht, bevor das Panel eingeblendet wird.)
+            if self._sheet:
+                self._sheet.pack_forget()
             self._tb_panel.pack(in_=self._body, side="right",
                                 fill="y", padx=(4, 0), pady=(0, 6))
+            if self._sheet:
+                self._sheet.pack(fill="both", expand=True,
+                                 padx=(4, 0), pady=(0, 6))
             self._tb_panel_visible = True
             self.b_tagesbote.config(text="◀  Tagesbote")
 
@@ -5481,13 +5489,8 @@ class App(tk.Tk):
         self._pub_verpackt_lbl  = _pub_card(_pub_cards, 1, "Verpackt (PU)",    "#16a085")
         self._pub_abhol_lbl     = _pub_card(_pub_cards, 2, "Abholbereit (PU)", "#1abc9c")
 
-        # 2. Tagesboten Abgleich
-        self.tab_tagesboten = TagesbotenAbgleichTab(
-            self.nb,
-            get_abholer_df    = lambda: self.last_abholer_df,
-            get_export_folder = lambda: self.export_folder,
-        )
-        self.nb.add(self.tab_tagesboten.frame, text="  Tagesboten Abgleich  ")
+        # Tagesboten Abgleich ist jetzt als Seitenpanel in PU heute eingebettet
+        # (kein separater Tab mehr nötig)
 
         # 2b. Statistik (PU + DHL)
         self.tab_statistik = StatistikTab(
@@ -6371,11 +6374,6 @@ class App(tk.Tk):
              "Tour 1: verpackt vor 11:16 Uhr\n"
              "Tour 2: verpackt ab 11:16 Uhr\n"
              "Export: Excel mit Fehlerliste (Tour 1 / Tour 2)"),
-            ("tagesboten",  "📋  Tagesbote",       self.tab_tagesboten.frame,
-             "Tagesboten-Abgleich:\n"
-             "Fehlerliste → Abholbereit_At fehlt\n"
-             "Errorliste → Barcode nicht in DB\n"
-             "Direkt Einträge anlegen oder korrigieren"),
             ("abholbereit", "📦  Abholbereit",     self.tab_abhol.frame,
              "Alle abholbereiten Pakete (vollständige Liste).\n"
              "Älteste zuerst. Aktionen:\n"
