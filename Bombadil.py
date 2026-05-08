@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.18"
+VERSION = "1.0.19"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -586,9 +586,10 @@ def compute_all_rows(source):
                 wt = ""
         else:
             wt = "?"
-        # Reihenfolge: bc, nm, bw, zahlung, status, dt, wt, oid
-        # Indizes:       0   1   2     3       4    5   6   7
-        rows_pay.append((bc, nm, bw, z_raw, status_raw, fmt_dt(dt_raw), wt, oid))
+        # Reihenfolge: bc, nm, bw, status, dt, wt, oid
+        # Indizes:       0   1   2    3     4   5   6
+        _ = z_raw  # nicht mehr in UI, bleibt aber in DB-Spalte 'Zahlung'
+        rows_pay.append((bc, nm, bw, status_raw, fmt_dt(dt_raw), wt, oid))
 
     def rows_yesterday(dfx):
         """Gestern abgeholt: Barcode, Name, Abgeholt_At, Ziel-Kiosk – neueste zuerst."""
@@ -5676,7 +5677,7 @@ class App(tk.Tk):
         _PAY_ABGEHOLT    = "#bdd0e8"   # stahlblau   – abgeholt
 
         def _pay_color(row):
-            s = str(row[4]).lower() if len(row) > 4 else ""
+            s = str(row[3]).lower() if len(row) > 3 else ""
             if s == "abgeholt":    return _PAY_ABGEHOLT
             if s == "abholbereit": return _PAY_ABHOLBEREIT
             if "verpackt" in s:    return _PAY_VERPACKT
@@ -5688,14 +5689,13 @@ class App(tk.Tk):
             [("barcode",  "Paket-Barcode",  200),
              ("name",     "Name",           320),
              ("bw",       "Bestellwert",    110),
-             ("zahlung",  "Zahlung",        130),
              ("status",   "Status",         130),
              ("dt",       "Abholbereit_At", 155),
              ("wt",       "Wartezeit",       80)],
             row_color_fn=_pay_color,
-            editable_col_map={2: "bestellwert", 3: "zahlung"},
+            editable_col_map={2: "bestellwert"},
             orca_sheet_id=ORCA_ABHOLER_SHEET_ID,
-            orca_id_idx=7,
+            orca_id_idx=6,
             legend_items=[
                 (_PAY_OFFEN,       "Offen / noch nicht verpackt"),
                 (_PAY_VERPACKT,    "Verpackt – wartet auf Tour"),
@@ -6855,7 +6855,7 @@ class App(tk.Tk):
         if row_idx is None or row_idx >= len(self.tab_pay.filtered):
             return
         row = self.tab_pay.filtered[row_idx]
-        oid = row[7] if len(row) > 7 else ""
+        oid = row[6] if len(row) > 6 else ""
         if not oid:
             return
         menu = tk.Menu(self.nb, tearoff=0)
@@ -6870,7 +6870,7 @@ class App(tk.Tk):
 
     def _set_pay_bezahlt(self, row):
         """Setzt Zahlung für eine Zeile auf 'Bezahlt' in OrcaScan und entfernt sie lokal."""
-        oid, bc, nm = row[7], row[0], row[1]
+        oid, bc, nm = row[6], row[0], row[1]
         self._start_loading(f"Setze '{bc}' auf bezahlt …")
         def _worker():
             result = update_rows_orca_bulk(
@@ -6898,11 +6898,11 @@ class App(tk.Tk):
             return
         new_rows = []
         for row in self.tab_pay.rows:
-            bc, status = row[0], row[4]
+            bc, status = row[0], row[3]
             tour = tour_map.get(bc, "")
             if tour and "verpackt" in status.lower():
                 row = list(row)
-                row[4] = f"Verpackt ({tour})"
+                row[3] = f"Verpackt ({tour})"
                 row = tuple(row)
             new_rows.append(row)
         self.tab_pay.rows = new_rows
