@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.19"
+VERSION = "1.0.20"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -559,8 +559,8 @@ def compute_all_rows(source):
         sl = str(s).lower()
         if sl == "abholbereit": return 0
         if "verpackt" in sl:    return 1
-        if sl == "abgeholt":    return 2
-        return 3
+        if sl == "abgeholt":    return 3   # ganz nach unten
+        return 2                            # offene/sonstige unter die Verpackten
 
     zahlung_offen_df["_sort"] = zahlung_offen_df[c_status].apply(_status_sort)
     zahlung_offen_df = zahlung_offen_df.sort_values(
