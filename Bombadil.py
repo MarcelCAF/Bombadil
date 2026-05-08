@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.15"
+VERSION = "1.0.16"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -553,23 +553,31 @@ def compute_all_rows(source):
         return bool(s) and any(k in s for k in keywords_pay)
 
     zahlung_mask      = zahlung_norm.apply(has_keyword)
-    abholbereit_has   = df[c_abholbereit].notna()
-    abgeholt_missing  = df[c_abgeholt].isna()
-    zahlung_offen_df  = df[zahlung_mask & abholbereit_has & abgeholt_missing].copy()
+    zahlung_offen_df  = df[zahlung_mask].copy()
+
+    def _status_sort(s):
+        sl = str(s).lower()
+        if sl == "abholbereit": return 0
+        if "verpackt" in sl:    return 1
+        if sl == "abgeholt":    return 2
+        return 3
+
+    zahlung_offen_df["_sort"] = zahlung_offen_df[c_status].apply(_status_sort)
+    zahlung_offen_df = zahlung_offen_df.sort_values(
+        ["_sort", c_abholbereit], ascending=[True, True], na_position="last")
 
     rows_pay = []
-    zahlung_offen_df = zahlung_offen_df.sort_values(
-        by=c_abholbereit, ascending=True, na_position="last")
     for _, r in zahlung_offen_df.iterrows():
         bc = "" if pd.isna(r[c_barcode]) else str(r[c_barcode]).strip()
         if not bc:
             continue
-        nm    = "" if pd.isna(r[c_name])      else str(r[c_name]).strip()
-        z_raw = "" if pd.isna(r[c_zahlung])   else str(r[c_zahlung]).strip()
-        bw    = ("" if c_bestellwert is None or pd.isna(r[c_bestellwert])
-                 else str(r[c_bestellwert]).strip())
-        oid   = "" if "_id" not in r.index or pd.isna(r["_id"]) else str(r["_id"]).strip()
-        dt_raw = r[c_abholbereit]
+        nm         = "" if pd.isna(r[c_name])      else str(r[c_name]).strip()
+        z_raw      = "" if pd.isna(r[c_zahlung])   else str(r[c_zahlung]).strip()
+        status_raw = "" if pd.isna(r[c_status])    else str(r[c_status]).strip()
+        bw         = ("" if c_bestellwert is None or pd.isna(r[c_bestellwert])
+                      else str(r[c_bestellwert]).strip())
+        oid        = "" if "_id" not in r.index or pd.isna(r["_id"]) else str(r["_id"]).strip()
+        dt_raw     = r[c_abholbereit]
         if pd.notna(dt_raw):
             try:
                 days = (today - pd.Timestamp(dt_raw).normalize().date()).days
@@ -578,8 +586,9 @@ def compute_all_rows(source):
                 wt = ""
         else:
             wt = "?"
-        # Reihenfolge: bc, dt, nm, zahlung, bestellwert, wt, oid (oid bleibt am Ende für Button-Logik)
-        rows_pay.append((bc, fmt_dt(dt_raw), nm, z_raw, bw, wt, oid))
+        # Reihenfolge: bc, dt, nm, status, zahlung, bestellwert, wt, oid
+        # Indizes:       0    1   2    3       4          5        6   7
+        rows_pay.append((bc, fmt_dt(dt_raw), nm, status_raw, z_raw, bw, wt, oid))
 
     def rows_yesterday(dfx):
         """Gestern abgeholt: Barcode, Name, Abgeholt_At, Ziel-Kiosk – neueste zuerst."""
@@ -1913,7 +1922,8 @@ class TableTab:
 
     def __init__(self, parent, title: str, columns: list[tuple[str, str, int]],
                  today_header: bool = False, row_color_fn=None,
-                 editable_col_map=None, orca_sheet_id=None, orca_id_idx=None):
+                 editable_col_map=None, orca_sheet_id=None, orca_id_idx=None,
+                 legend_items=None):
         try:
             from tksheet import Sheet as _Sheet
         except ImportError:
@@ -1942,16 +1952,35 @@ class TableTab:
                                   anchor="e", width=(28 if today_header else 16))
         self.count_lbl.pack(side="left", padx=(8, 0))
 
-        # -- Tabelle (tksheet)
+        # -- Tabelle (tksheet) + optionale Seitenlegende
         tr = tk.Frame(self.frame)
         tr.pack(fill="both", expand=True)
+
+        if legend_items:
+            _legend = tk.Frame(tr, bg="#f5f5f5", bd=1, relief="groove", width=185)
+            _legend.pack(side="right", fill="y", padx=(4, 0), pady=(0, 4))
+            _legend.pack_propagate(False)
+            tk.Label(_legend, text="Legende", font=("Segoe UI", 9, "bold"),
+                     bg="#f5f5f5", anchor="w").pack(fill="x", padx=8, pady=(8, 4))
+            for _color, _text in legend_items:
+                _row_l = tk.Frame(_legend, bg="#f5f5f5")
+                _row_l.pack(fill="x", padx=8, pady=2)
+                tk.Frame(_row_l, bg=_color, width=16, height=16,
+                         relief="solid", bd=1).pack(side="left")
+                tk.Label(_row_l, text=f"  {_text}", font=("Segoe UI", 8),
+                         bg="#f5f5f5", anchor="w", wraplength=145,
+                         justify="left").pack(side="left", fill="x")
+            _sheet_host = tk.Frame(tr)
+            _sheet_host.pack(side="left", fill="both", expand=True)
+        else:
+            _sheet_host = tr
 
         headers = [c[1] for c in columns]
 
         if _Sheet:
             try:
                 self.sheet = _Sheet(
-                    tr,
+                    _sheet_host,
                     headers=headers,
                     show_row_index=False,
                     header_font=("Segoe UI", 10, "bold"),
@@ -1960,7 +1989,7 @@ class TableTab:
                 )
             except Exception:
                 # Minimalversion falls Parameter nicht passen
-                self.sheet = _Sheet(tr, headers=headers)
+                self.sheet = _Sheet(_sheet_host, headers=headers)
             self.sheet.pack(fill="both", expand=True)
             try:
                 self.sheet.set_column_widths([c[2] for c in columns])
@@ -1979,7 +2008,7 @@ class TableTab:
                 pass
         else:
             # Fallback: einfaches Label wenn tksheet nicht installiert
-            tk.Label(tr, text="tksheet nicht installiert.\nBitte 'pip install tksheet' ausführen.",
+            tk.Label(_sheet_host, text="tksheet nicht installiert.\nBitte 'pip install tksheet' ausführen.",
                      fg="red", font=("Segoe UI", 10)).pack(expand=True)
             self.sheet = None
 
@@ -3734,6 +3763,70 @@ class TagesbotenAbgleichTab:
         if ok:
             self._run()   # Daten neu laden damit Tab aktuell ist
 
+    # ── Zahlung offen – Rechtsklick-Menü ─────────────────────────────────────
+
+    def _pay_right_click(self, event):
+        """Rechtsklick auf eine Zeile im Zahlung-offen-Tab öffnet Kontextmenü."""
+        try:
+            row_idx = self.tab_pay.sheet.identify_row(event, allow_end=False)
+        except Exception:
+            return
+        if row_idx is None or row_idx >= len(self.tab_pay.filtered):
+            return
+        row = self.tab_pay.filtered[row_idx]
+        oid = row[7] if len(row) > 7 else ""
+        if not oid:
+            return
+        menu = tk.Menu(self.nb, tearoff=0)
+        menu.add_command(
+            label="✔  Als bezahlt markieren",
+            command=lambda: self._set_pay_bezahlt(row)
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_pay_bezahlt(self, row):
+        """Setzt Zahlung für eine Zeile auf 'Bezahlt' in OrcaScan und entfernt sie lokal."""
+        oid, bc, nm = row[7], row[0], row[2]
+        self._start_progress(f"Setze '{bc}' auf bezahlt …")
+        def _worker():
+            result = update_rows_orca_bulk(
+                [(oid, bc, nm)], {"zahlung": "Bezahlt"},
+                sheet_id=ORCA_ABHOLER_SHEET_ID)
+            self.after(0, lambda: _done(result))
+        def _done(result):
+            failed = result.get("failed", [])
+            if failed:
+                self._stop_progress(f"❌ Fehler: {failed[0][:60]}")
+            else:
+                # Zeile lokal aus der Liste entfernen
+                self.tab_pay.rows = [r for r in self.tab_pay.rows if r[0] != bc]
+                self.tab_pay.refresh()
+                self._stop_progress(f"✓ '{bc}' als bezahlt markiert")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _enrich_pay_tours(self):
+        """Ergänzt den Status im Zahlung-offen-Tab mit Tournummer aus PU heute."""
+        if not hasattr(self, "tab_pay"):
+            return
+        pu_rows  = getattr(self.tab_pickup_heute, "_all_rows", [])
+        tour_map = {r["barcode"]: r.get("tour", "") for r in pu_rows if r.get("tour")}
+        if not tour_map:
+            return
+        new_rows = []
+        for row in self.tab_pay.rows:
+            bc, status = row[0], row[3]
+            tour = tour_map.get(bc, "")
+            if tour and "verpackt" in status.lower():
+                row = list(row)
+                row[3] = f"Verpackt ({tour})"
+                row = tuple(row)
+            new_rows.append(row)
+        self.tab_pay.rows = new_rows
+        self.tab_pay.refresh()
+
     def _run(self, force_reload: bool = False):
         self._start_progress("⏳  Lade Abholer_DB aus OrcaScan …")
         self._hide_notification()
@@ -4155,11 +4248,12 @@ class PickupHeuteTab:
     PU_REFRESH_INTERVAL_MS = 2 * 60 * 1000   # 2 Minuten
 
     def __init__(self, parent, get_abholer_df=None, on_count_change=None,
-                 get_export_folder=None):
+                 get_export_folder=None, on_pu_loaded=None):
         self.get_abholer_df   = get_abholer_df
         self.get_export_folder = get_export_folder
         self._loading         = False
         self.on_count_change  = on_count_change   # Callback(n) → Kachel im Report aktualisieren
+        self._on_pu_loaded    = on_pu_loaded       # Callback() → nach jedem vollständigem Load
         self._last_load_date  = None              # Datum des letzten erfolgreichen Loads
         self._refresh_job     = None              # after()-Job für Auto-Refresh
         self._all_rows        = []                # Alle geladenen Zeilen (leer bis erster Load)
@@ -4920,6 +5014,8 @@ class PickupHeuteTab:
             import datetime as _dt2
             self._last_load_date = (_dt2.datetime.now()).date()
             self._refresh_ui()
+            if self._on_pu_loaded:
+                self.frame.after(0, self._on_pu_loaded)
         self._schedule_refresh()
 
     def _refresh_ui(self):
@@ -5550,6 +5646,7 @@ class App(tk.Tk):
             get_abholer_df    = lambda: self.last_abholer_df,
             on_count_change   = self._on_pu_count_change,
             get_export_folder = lambda: self.export_folder,
+            on_pu_loaded      = self._enrich_pay_tours,
         )
         self.nb.add(self.tab_pickup_heute.frame, text="  Pickup heute  ")
 
@@ -5637,54 +5734,48 @@ class App(tk.Tk):
         self.nb.add(self.tab_verpackt.frame, text="  Verpackt  ")
 
         # 5. Zahlung offen
+        _PAY_OFFEN       = "#f0b8b0"   # altrosa     – noch nicht verpackt / offen
+        _PAY_VERPACKT    = "#f0e4a0"   # buttergelb  – verpackt, wartet auf Tour
+        _PAY_ABHOLBEREIT = "#bdd8c8"   # salbeigrün  – am Standort
+        _PAY_ABGEHOLT    = "#bdd0e8"   # stahlblau   – abgeholt
+
         def _pay_color(row):
-            wt = row[5] if len(row) > 5 else ""
-            if wt == "?":
-                return "#fff3cd"
-            try:
-                days = int(wt.split()[0])
-                if days > 14:
-                    return "#f8d7da"
-                if days > 7:
-                    return "#fef3e2"
-            except Exception:
-                pass
-            return None
+            s = str(row[3]).lower() if len(row) > 3 else ""
+            if s == "abgeholt":    return _PAY_ABGEHOLT
+            if s == "abholbereit": return _PAY_ABHOLBEREIT
+            if "verpackt" in s:    return _PAY_VERPACKT
+            return _PAY_OFFEN
+
         self.tab_pay = TableTab(
             self.nb,
             "Zahlung offen",
-            [("barcode", "Paket-Barcode", 220), ("dt", "Abholbereit_At", 175),
-             ("name", "Name", 380), ("zahlung", "Zahlung", 160),
-             ("bw", "Bestellwert", 120), ("wt", "Wartezeit", 90)],
+            [("barcode",  "Paket-Barcode",  200),
+             ("dt",       "Abholbereit_At", 155),
+             ("name",     "Name",           320),
+             ("status",   "Status",         130),
+             ("zahlung",  "Zahlung",        130),
+             ("bw",       "Bestellwert",    110),
+             ("wt",       "Wartezeit",       80)],
             row_color_fn=_pay_color,
-            editable_col_map={3: "zahlung", 4: "bestellwert"},
+            editable_col_map={4: "zahlung", 5: "bestellwert"},
             orca_sheet_id=ORCA_ABHOLER_SHEET_ID,
-            orca_id_idx=6,
+            orca_id_idx=7,
+            legend_items=[
+                (_PAY_OFFEN,       "Offen / noch nicht verpackt"),
+                (_PAY_VERPACKT,    "Verpackt – wartet auf Tour"),
+                (_PAY_ABHOLBEREIT, "Abholbereit – am Standort"),
+                (_PAY_ABGEHOLT,    "Abgeholt"),
+            ],
         )
         self.nb.add(self.tab_pay.frame, text="  Zahlung offen  ")
 
-        # Button: Auswahl als bezahlt markieren (direkt → OrcaScan)
-        def _als_bezahlt_setzen():
-            selected = self.tab_pay.get_selected_rows()
-            rows_all = self.tab_pay.filtered
-            updates  = [(row[6], row[0], row[2]) for row in
-                        (rows_all[i] for i in selected if i < len(rows_all))
-                        if len(row) > 6 and row[6]]
-            if not updates:
-                messagebox.showwarning("Als bezahlt markieren",
-                    "Bitte zuerst eine oder mehrere Zeilen markieren.")
-                return
-            self._start_progress(f"Setze {len(updates)} Paket(e) auf 'paid' …")
-            def _worker():
-                result = update_rows_orca_bulk(updates, {"zahlung": "paid"})
-                self.after(0, lambda: self._finish_zahlung_update(result))
-            threading.Thread(target=_worker, daemon=True).start()
+        # Standard-Buttons entfernen (Kopieren, Suche leeren werden nicht gebraucht)
+        for _w in list(self.tab_pay.btn_frame.winfo_children()):
+            _w.destroy()
 
-        b_zahlung = tk.Button(self.tab_pay.btn_frame, text="✔ Auswahl → bezahlt",
-                              command=_als_bezahlt_setzen,
-                              bg="#27ae60", fg="white", font=("Segoe UI", 9, "bold"))
-        b_zahlung.pack(side="left", padx=(12, 0))
-        add_tooltip(b_zahlung, "Setzt den Zahlungsstatus der markierten Pakete auf 'paid' in OrcaScan.")
+        # Rechtsklick → Kontextmenü
+        if self.tab_pay.sheet:
+            self.tab_pay.sheet.bind("<Button-3>", self._pay_right_click)
 
         # 6. > 7 Tage
         def _older7_color(row):
@@ -6853,6 +6944,7 @@ class App(tk.Tk):
         self.tab_older.set_rows(r_older)
         self.tab_yest.set_rows(r_yest)
         self.tab_pay.set_rows(r_pay)
+        self._enrich_pay_tours()
         self.tab_kissel.set_rows(r_kissel)
         self.tab_verpackt.set_rows(r_verpackt)
         # Pakete heute = DHL Normal + DHL Express + PU heute
