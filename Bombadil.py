@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.20"
+VERSION = "1.0.21"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -474,7 +474,10 @@ def compute_all_rows(source):
     today           = today_date()
     yesterday       = today - timedelta(days=1)
     seven_days_ago  = today - timedelta(days=7)
-    three_weeks_ago = today - timedelta(days=21)
+    # 10 Werktage rückwärts (Mo–Fr, Wochenenden ausgespart) – für Kissel > 2 Wochen
+    import numpy as _np
+    ten_workdays_ago = _np.busday_offset(_np.datetime64(today, "D"),
+                                         -10, roll="backward").astype("datetime64[D]").astype(object)
 
     status_norm = df[c_status].astype(str).str.strip().str.lower()
 
@@ -604,14 +607,14 @@ def compute_all_rows(source):
             out.append((bc, nm, fmt_dt(r[c_abgeholt]), zk))
         return out
 
-    # Kissel > 3 Wochen
+    # Kissel > 2 Wochen (= 10 Werktage)
     ziel_norm   = df[c_zielkiosk].apply(norm_str)
     kissel_mask = ziel_norm.str.contains("kissel", na=False)
     kissel_df   = df[
         status_norm.eq("abholbereit")
         & kissel_mask
         & df[c_abholbereit].notna()
-        & (df[c_abholbereit].dt.date < three_weeks_ago)
+        & (df[c_abholbereit].dt.date < ten_workdays_ago)
     ].copy()
 
     kissel_df = kissel_df.sort_values(by=c_abholbereit, ascending=True, na_position="last")
@@ -1998,6 +2001,44 @@ class TableTab:
                 pass
             try:
                 self.sheet.enable_bindings()
+            except Exception:
+                pass
+            # Kontextmenü-Beschriftungen auf Deutsch
+            try:
+                self.sheet.set_options(
+                    edit_cell_label            = "Zelle bearbeiten",
+                    edit_header_label          = "Spaltenüberschrift bearbeiten",
+                    edit_index_label           = "Zeilenindex bearbeiten",
+                    cut_label                  = "Ausschneiden",
+                    copy_label                 = "Kopieren",
+                    copy_plain_label           = "Text kopieren",
+                    paste_label                = "Einfügen",
+                    delete_label               = "Löschen",
+                    clear_contents_label       = "Inhalt leeren",
+                    delete_rows_label          = "Zeilen löschen",
+                    insert_rows_above_label    = "Zeilen oberhalb einfügen",
+                    insert_rows_below_label    = "Zeilen unterhalb einfügen",
+                    insert_row_label           = "Zeile einfügen",
+                    delete_columns_label       = "Spalten löschen",
+                    insert_columns_left_label  = "Spalten links einfügen",
+                    insert_columns_right_label = "Spalten rechts einfügen",
+                    insert_column_label        = "Spalte einfügen",
+                    sort_cells_label           = "Aufsteigend sortieren",
+                    sort_cells_reverse_label   = "Absteigend sortieren",
+                    sort_cells_x_label         = "Zeilenweise aufsteigend sortieren",
+                    sort_cells_x_reverse_label = "Zeilenweise absteigend sortieren",
+                    sort_row_label             = "Werte aufsteigend sortieren",
+                    sort_row_reverse_label     = "Werte absteigend sortieren",
+                    sort_column_label          = "Werte aufsteigend sortieren",
+                    sort_column_reverse_label  = "Werte absteigend sortieren",
+                    sort_rows_label            = "Zeilen aufsteigend sortieren",
+                    sort_rows_reverse_label    = "Zeilen absteigend sortieren",
+                    sort_columns_label         = "Spalten aufsteigend sortieren",
+                    sort_columns_reverse_label = "Spalten absteigend sortieren",
+                    select_all_label           = "Alle markieren",
+                    undo_label                 = "Rückgängig",
+                    redo_label                 = "Wiederherstellen",
+                )
             except Exception:
                 pass
             try:
@@ -5396,8 +5437,8 @@ class App(tk.Tk):
              "Pakete bei denen die Zahlung\nnoch aussteht.\n\nKlicken für Detailliste"),
             ("older7", "> 7 Tage",     "⏰", "#e67e22", "warn50",
              "Abholbereite Pakete die seit mehr\nals 7 Tagen warten.\nWird rot bei mehr als 50 Einträgen.\n\nKlicken für Detailliste"),
-            ("kissel", "Kissel > 3W",  "🏪", "#8e44ad", "warn",
-             "Pakete im Kissel-Kiosk die\nmehr als 3 Wochen alt sind.\nWird rot sobald Einträge vorhanden.\n\nKlicken für Detailliste"),
+            ("kissel", "Kissel > 2W",  "🏪", "#8e44ad", "warn",
+             "Pakete im Kissel-Kiosk die\nmehr als 2 Wochen (10 Werktage) alt sind.\nWird rot sobald Einträge vorhanden.\n\nKlicken für Detailliste"),
         ]
         for col, (key, label, icon, color, mode, tip) in enumerate(_ROW1):
             self._make_tile(_row1_frame, key, label, icon, color, mode, row=0, col=col, tooltip=tip)
@@ -5771,7 +5812,7 @@ class App(tk.Tk):
             _box.pack_propagate(False)
             tk.Label(_leg7, text=_txt, font=("Segoe UI", 8), fg=_fg).pack(side="left", padx=(0, 8))
 
-        # 7. Kissel > 3W
+        # 7. Kissel > 2W
         def _kissel_color(row):
             wt = row[4] if len(row) > 4 else ""
             try:
@@ -5780,17 +5821,17 @@ class App(tk.Tk):
                     return "#a93226"   # dunkelrot – älter als 3 Monate
                 if days > 42:
                     return "#f8d7da"   # rot – älter als 6 Wochen
-                return "#fef3e2"       # orange – 3–6 Wochen
+                return "#fef3e2"       # orange – 2–6 Wochen
             except Exception:
                 return None
 
         self.tab_kissel = TableTab(
-            self.nb, "Kissel: länger als 3 Wochen abholbereit",
+            self.nb, "Kissel: länger als 2 Wochen (10 Werktage) abholbereit",
             [("barcode", "Paket-Barcode", 230), ("name", "Name", 400),
              ("dt", "Abholbereit_At", 175), ("kiosk", "Ziel-Kiosk", 130), ("wt", "Wartezeit", 90)],
             row_color_fn=_kissel_color,
         )
-        self.nb.add(self.tab_kissel.frame, text="  Kissel > 3W  ")
+        self.nb.add(self.tab_kissel.frame, text="  Kissel > 2W  ")
 
         _b = tk.Button(self.tab_kissel.btn_frame, text="↩  Retoure",
                        command=self._kissel_set_retoure,
@@ -5887,7 +5928,7 @@ class App(tk.Tk):
                 "• Pakete heute (DHL + PU gesamt)\n"
                 "• PU heute (verpackt · offen · %)\n"
                 "• Abholbereit (warten auf Abholung)\n"
-                "• Zahlung offen · > 7 Tage · Kissel > 3W\n"
+                "• Zahlung offen · > 7 Tage · Kissel > 2W\n"
                 "Klick auf Kachel → Detailliste\n"
                 "Balkendiagramm: Abholungen letzte 7 Tage",
 
@@ -5953,10 +5994,10 @@ class App(tk.Tk):
                 "Aktionen (Zeilen markieren, dann Button):\n"
                 "• ↩ Retoure · ✗ Storno · ✓ Abgeholt",
 
-            "  Kissel > 3W  ":
+            "  Kissel > 2W  ":
                 "Pakete am Standort Kissel die seit\n"
-                "mehr als 3 Wochen nicht abgeholt wurden.\n\n"
-                "Farben: Orange=3–6 Wochen\n"
+                "mehr als 2 Wochen (10 Werktage) nicht abgeholt wurden.\n\n"
+                "Farben: Orange=2–6 Wochen\n"
                 "Rot=6W–3 Monate · Dunkelrot=>3 Monate\n\n"
                 "Aktionen (Zeilen markieren, dann Button):\n"
                 "• ↩ Retoure · ✗ Storno · ✓ Abgeholt",
@@ -6027,7 +6068,7 @@ class App(tk.Tk):
             "older7":      (self.tab_older,    "⏰ > 7 Tage",
                             [("Paket-Barcode", 230), ("Name", 400), ("Abholbereit_At", 175), ("Ziel-Kiosk", 130), ("Wartezeit", 90)],
                             _older7_color),
-            "kissel":      (self.tab_kissel,   "🏪 Kissel > 3W",
+            "kissel":      (self.tab_kissel,   "🏪 Kissel > 2W",
                             [("Paket-Barcode", 230), ("Name", 400), ("Abholbereit_At", 175), ("Ziel-Kiosk", 130), ("Wartezeit", 90)],
                             _kissel_color),
             "yesterday":   (self.tab_yest,     "✅ Gestern abgeholt",
@@ -6458,9 +6499,9 @@ class App(tk.Tk):
              "Orange=7–14 Tage · Rot=15–30 Tage\n"
              "Dunkelrot=>30 Tage\n"
              "Aktionen: ↩ Retoure · ✗ Storno · ✓ Abgeholt"),
-            ("kissel",      "🏪  Kissel > 3W",     self.tab_kissel.frame,
-             "Kissel-Pakete seit mehr als 3 Wochen.\n"
-             "Orange=3–6 Wo · Rot=6Wo–3 Mon\n"
+            ("kissel",      "🏪  Kissel > 2W",     self.tab_kissel.frame,
+             "Kissel-Pakete seit mehr als 2 Wochen (10 Werktage).\n"
+             "Orange=2–6 Wo · Rot=6Wo–3 Mon\n"
              "Dunkelrot=>3 Monate\n"
              "Aktionen: ↩ Retoure · ✗ Storno · ✓ Abgeholt"),
             ("unstimmig",   "🔍  Unstimmigkeiten", self._unstimm_container,
@@ -7032,8 +7073,8 @@ class App(tk.Tk):
             ("",  "Pakete mit Status 'Verpackt' aber noch kein Abholbereit_At – warten auf Freigabe.\n\n"),
             ("h", "💳  Zahlung offen\n"),
             ("",  "Pakete bei denen die Zahlung noch aussteht.\n\n"),
-            ("h", "🏪  Kissel > 3W\n"),
-            ("",  "Pakete am Kiosk Kissel die seit mehr als 3 Wochen nicht abgeholt wurden.\n\n"),
+            ("h", "🏪  Kissel > 2W\n"),
+            ("",  "Pakete am Kiosk Kissel die seit mehr als 2 Wochen (10 Werktage) nicht abgeholt wurden.\n\n"),
             ("h", "🚚  DHL_Express (heute)\n"),
             ("",  "Heutige DHL Express Scans – aus OrcaScan oder lokaler Excel-Datei.\n\n"),
             ("h", "📬  DHL (heute)\n"),
