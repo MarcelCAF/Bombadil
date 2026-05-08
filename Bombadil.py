@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.21"
+VERSION = "1.0.22"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -5650,44 +5650,26 @@ class App(tk.Tk):
             editable_col_map={3: "zielu002dkiosk"},
             orca_sheet_id=ORCA_ABHOLER_SHEET_ID,
             orca_id_idx=5,
+            legend_items=[
+                ("#fff3cd", "Kein Datum"),
+                ("#fef3e2", "> 3 Tage"),
+                ("#f8d7da", "> 7 Tage"),
+            ],
         )
         self.nb.add(self.tab_abhol.frame, text="  Abholbereit  ")
 
-        _b = tk.Button(self.tab_abhol.btn_frame, text="↩  Retoure",
-                       command=self._abhol_set_retoure,
-                       bg="#e8a44a", fg="white", activebackground="#d08830",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(8, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Retoure' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_abhol.btn_frame, text="✗  Storno",
-                       command=self._abhol_set_storno,
-                       bg="#d96b6b", fg="white", activebackground="#c04848",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Storno' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_abhol.btn_frame, text="✓  Abgeholt",
-                       command=self._abhol_set_abgeholt,
-                       bg="#4ea874", fg="white", activebackground="#37855a",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Abgeholt' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
+        # Standard-Buttons (Kopieren, Suche leeren) entfernen
+        for _w in list(self.tab_abhol.btn_frame.winfo_children()):
+            _w.destroy()
 
-        # Farblegende in der Button-Zeile des Abholbereit-Tabs
-        _legend_frame = tk.Frame(self.tab_abhol.btn_frame)
-        _legend_frame.pack(side="right", padx=(12, 0))
-        tk.Label(_legend_frame, text="Legende:", font=("Segoe UI", 8)).pack(side="left", padx=(0, 6))
-        for _bg, _txt in [("#fff3cd", "kein Datum"), ("#fef3e2", "> 3 Tage"), ("#f8d7da", "> 7 Tage")]:
-            _box = tk.Frame(_legend_frame, bg=_bg, width=14, height=14,
-                            relief="solid", bd=1)
-            _box.pack(side="left", padx=(0, 2))
-            _box.pack_propagate(False)
-            tk.Label(_legend_frame, text=_txt, font=("Segoe UI", 8)).pack(side="left", padx=(0, 8))
+        # Rechtsklick → Kontextmenü mit Retoure / Storno / Abgeholt
+        if self.tab_abhol.sheet:
+            # Nicht benötigte Sortier-Optionen aus dem tksheet-Menü entfernen
+            try:
+                self.tab_abhol.sheet.disable_bindings("sort_columns")
+            except Exception:
+                pass
+            self.tab_abhol.sheet.bind("<Button-3>", self._abhol_right_click)
 
         # Verpackt – als versteckter Tab (kein Sidebar-Eintrag, nur für Kachel-Detail)
         def _verpackt_color(row):
@@ -6904,6 +6886,35 @@ class App(tk.Tk):
             label="✔  Als bezahlt markieren",
             command=lambda: self._set_pay_bezahlt(row)
         )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _abhol_right_click(self, event):
+        """Rechtsklick auf Abholbereit → Kontextmenü mit Retoure / Storno / Abgeholt."""
+        sheet = self.tab_abhol.sheet
+        try:
+            row_idx = sheet.identify_row(event, allow_end=False)
+        except Exception:
+            return
+        if row_idx is None:
+            return
+
+        # Wenn die geklickte Zeile nicht Teil der aktuellen Selektion ist,
+        # Selektion auf genau diese Zeile setzen (sonst Selektion behalten).
+        selected = self.tab_abhol.get_selected_rows()
+        if row_idx not in selected:
+            try:
+                sheet.deselect("all")
+                sheet.select_row(row_idx)
+            except Exception:
+                pass
+
+        menu = tk.Menu(self.nb, tearoff=0)
+        menu.add_command(label="↩  Retoure",  command=self._abhol_set_retoure)
+        menu.add_command(label="✗  Storno",   command=self._abhol_set_storno)
+        menu.add_command(label="✓  Abgeholt", command=self._abhol_set_abgeholt)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
