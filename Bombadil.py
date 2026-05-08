@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.16"
+VERSION = "1.0.17"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3763,70 +3763,6 @@ class TagesbotenAbgleichTab:
         if ok:
             self._run()   # Daten neu laden damit Tab aktuell ist
 
-    # ── Zahlung offen – Rechtsklick-Menü ─────────────────────────────────────
-
-    def _pay_right_click(self, event):
-        """Rechtsklick auf eine Zeile im Zahlung-offen-Tab öffnet Kontextmenü."""
-        try:
-            row_idx = self.tab_pay.sheet.identify_row(event, allow_end=False)
-        except Exception:
-            return
-        if row_idx is None or row_idx >= len(self.tab_pay.filtered):
-            return
-        row = self.tab_pay.filtered[row_idx]
-        oid = row[7] if len(row) > 7 else ""
-        if not oid:
-            return
-        menu = tk.Menu(self.nb, tearoff=0)
-        menu.add_command(
-            label="✔  Als bezahlt markieren",
-            command=lambda: self._set_pay_bezahlt(row)
-        )
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
-    def _set_pay_bezahlt(self, row):
-        """Setzt Zahlung für eine Zeile auf 'Bezahlt' in OrcaScan und entfernt sie lokal."""
-        oid, bc, nm = row[7], row[0], row[2]
-        self._start_progress(f"Setze '{bc}' auf bezahlt …")
-        def _worker():
-            result = update_rows_orca_bulk(
-                [(oid, bc, nm)], {"zahlung": "Bezahlt"},
-                sheet_id=ORCA_ABHOLER_SHEET_ID)
-            self.after(0, lambda: _done(result))
-        def _done(result):
-            failed = result.get("failed", [])
-            if failed:
-                self._stop_progress(f"❌ Fehler: {failed[0][:60]}")
-            else:
-                # Zeile lokal aus der Liste entfernen
-                self.tab_pay.rows = [r for r in self.tab_pay.rows if r[0] != bc]
-                self.tab_pay.refresh()
-                self._stop_progress(f"✓ '{bc}' als bezahlt markiert")
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _enrich_pay_tours(self):
-        """Ergänzt den Status im Zahlung-offen-Tab mit Tournummer aus PU heute."""
-        if not hasattr(self, "tab_pay"):
-            return
-        pu_rows  = getattr(self.tab_pickup_heute, "_all_rows", [])
-        tour_map = {r["barcode"]: r.get("tour", "") for r in pu_rows if r.get("tour")}
-        if not tour_map:
-            return
-        new_rows = []
-        for row in self.tab_pay.rows:
-            bc, status = row[0], row[3]
-            tour = tour_map.get(bc, "")
-            if tour and "verpackt" in status.lower():
-                row = list(row)
-                row[3] = f"Verpackt ({tour})"
-                row = tuple(row)
-            new_rows.append(row)
-        self.tab_pay.rows = new_rows
-        self.tab_pay.refresh()
-
     def _run(self, force_reload: bool = False):
         self._start_progress("⏳  Lade Abholer_DB aus OrcaScan …")
         self._hide_notification()
@@ -6907,6 +6843,70 @@ class App(tk.Tk):
             messagebox.showwarning("Logo", f"Logo konnte nicht geladen werden:\n{e}")
 
     # ------------------------------------------------------------------ actions
+
+    # ── Zahlung offen – Rechtsklick-Menü ─────────────────────────────────────
+
+    def _pay_right_click(self, event):
+        """Rechtsklick auf eine Zeile im Zahlung-offen-Tab öffnet Kontextmenü."""
+        try:
+            row_idx = self.tab_pay.sheet.identify_row(event, allow_end=False)
+        except Exception:
+            return
+        if row_idx is None or row_idx >= len(self.tab_pay.filtered):
+            return
+        row = self.tab_pay.filtered[row_idx]
+        oid = row[7] if len(row) > 7 else ""
+        if not oid:
+            return
+        menu = tk.Menu(self.nb, tearoff=0)
+        menu.add_command(
+            label="✔  Als bezahlt markieren",
+            command=lambda: self._set_pay_bezahlt(row)
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_pay_bezahlt(self, row):
+        """Setzt Zahlung für eine Zeile auf 'Bezahlt' in OrcaScan und entfernt sie lokal."""
+        oid, bc, nm = row[7], row[0], row[2]
+        self._start_loading(f"Setze '{bc}' auf bezahlt …")
+        def _worker():
+            result = update_rows_orca_bulk(
+                [(oid, bc, nm)], {"zahlung": "Bezahlt"},
+                sheet_id=ORCA_ABHOLER_SHEET_ID)
+            self.after(0, lambda: _done(result))
+        def _done(result):
+            failed = result.get("failed", [])
+            if failed:
+                self._stop_loading(f"❌ Fehler: {failed[0][:60]}")
+            else:
+                # Zeile lokal aus der Liste entfernen
+                self.tab_pay.rows = [r for r in self.tab_pay.rows if r[0] != bc]
+                self.tab_pay.refresh()
+                self._stop_loading(f"✓ '{bc}' als bezahlt markiert")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _enrich_pay_tours(self):
+        """Ergänzt den Status im Zahlung-offen-Tab mit Tournummer aus PU heute."""
+        if not hasattr(self, "tab_pay"):
+            return
+        pu_rows  = getattr(self.tab_pickup_heute, "_all_rows", [])
+        tour_map = {r["barcode"]: r.get("tour", "") for r in pu_rows if r.get("tour")}
+        if not tour_map:
+            return
+        new_rows = []
+        for row in self.tab_pay.rows:
+            bc, status = row[0], row[3]
+            tour = tour_map.get(bc, "")
+            if tour and "verpackt" in status.lower():
+                row = list(row)
+                row[3] = f"Verpackt ({tour})"
+                row = tuple(row)
+            new_rows.append(row)
+        self.tab_pay.rows = new_rows
+        self.tab_pay.refresh()
 
     def open_file(self):
         p = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xls")])
