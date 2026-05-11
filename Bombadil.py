@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.23"
+VERSION = "1.0.24"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4710,7 +4710,10 @@ class PickupHeuteTab:
         jetzt = (_dt.datetime.now()).strftime("%H:%M")
         # t1_barcodes vom Netzlaufwerk verwenden falls verfuegbar (konsistente Basis)
         t1_bc = set(netz.get("t1_barcodes") or tz.get("t1_barcodes") or [])
-        t2_barcodes = [r["barcode"] for r in self._all_rows if r["barcode"] not in t1_bc]
+        # Pakete mit Packstatus "Offen" gehoeren weder in T1 noch in T2
+        t2_barcodes = [r["barcode"] for r in self._all_rows
+                       if r["barcode"] not in t1_bc
+                       and r.get("tb_status", "").lower() != "offen"]
         _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=t2_barcodes)
         self._restore_tour_buttons()
         self._recompute_tours_local()
@@ -4870,7 +4873,10 @@ class PickupHeuteTab:
         t2_bc = set(tz.get("t2_barcodes") or [])
         for r in self._all_rows:
             bc = r["barcode"]
-            if bc in t1_bc:
+            # Pakete mit Packstatus "Offen" bekommen keine Toureinteilung
+            if r.get("tb_status", "").lower() == "offen":
+                r["tour"] = ""
+            elif bc in t1_bc:
                 r["tour"] = "T1"
             elif bc in t2_bc:
                 r["tour"] = "T2"
@@ -4907,11 +4913,14 @@ class PickupHeuteTab:
             rows, diag = compute_pickup_heute(abholer_df, tagesbote_df, t2_cutoff=None)
 
             # Tour-Zuweisung nur per gespeicherter Barcode-Liste (kein Scan-Zeit-Vergleich)
+            # Pakete mit Packstatus "Offen" bekommen keine Toureinteilung
             _t1_bc = set(_tz.get("t1_barcodes") or [])
             _t2_bc = set(_tz.get("t2_barcodes") or [])
             for _r in rows:
                 _bc = _r["barcode"]
-                if _bc in _t1_bc:
+                if _r.get("tb_status", "").lower() == "offen":
+                    _r["tour"] = ""
+                elif _bc in _t1_bc:
                     _r["tour"] = "T1"
                 elif _bc in _t2_bc:
                     _r["tour"] = "T2"
@@ -6308,6 +6317,78 @@ class App(tk.Tk):
         _th.Thread(target=_worker, daemon=True).start()
         self._set_status(f"Setze {len(updates)} Paket(e) → {new_status} …")
 
+    def _delete_rows_from_abholer_db(self, tab, barcode_idx: int = 0):
+        """Löscht selektierte Zeilen aus Abholer_DB (mit Bestätigungsdialog)."""
+        import threading as _th
+        selected = tab.get_selected_rows()
+        if not selected:
+            messagebox.showinfo("Hinweis", "Keine Zeile markiert.")
+            return
+        df = self.last_abholer_df
+        if df is None:
+            messagebox.showwarning("Fehler", "Abholer_DB nicht geladen.")
+            return
+        c_bc = first_existing(df, COL_BARCODE)
+        if not c_bc:
+            messagebox.showwarning("Fehler", "Barcode-Spalte nicht gefunden.")
+            return
+
+        row_ids = []
+        barcodes = []
+        missing = []
+        for row in selected:
+            barcode = str(row[barcode_idx]).strip()
+            mask = df[c_bc].astype(str).str.strip() == barcode
+            hits = df[mask]
+            if hits.empty:
+                missing.append(barcode)
+                continue
+            r      = hits.iloc[0]
+            row_id = str(r.get("_id", "")).strip()
+            if not row_id:
+                missing.append(barcode)
+                continue
+            row_ids.append(row_id)
+            barcodes.append(barcode)
+
+        if missing:
+            messagebox.showwarning(
+                "Nicht gefunden",
+                "Folgende Barcodes nicht in Abholer_DB:\n" + "\n".join(missing))
+        if not row_ids:
+            return
+
+        # Bestätigungsdialog – Löschen ist destruktiv, immer nachfragen
+        if not messagebox.askyesno(
+            "Löschen bestätigen",
+            f"{len(row_ids)} Paket(e) wirklich aus Abholer_DB löschen?\n\n"
+            "Diese Aktion kann nicht rückgängig gemacht werden."
+        ):
+            return
+
+        self._start_loading(f"Lösche {len(row_ids)} Paket(e) aus Abholer_DB …")
+
+        def _worker():
+            result = delete_rows_orca_bulk(row_ids, sheet_id=ORCA_ABHOLER_SHEET_ID)
+            self.after(0, lambda: _done(result))
+
+        def _done(result):
+            deleted = result.get("deleted", 0)
+            failed  = result.get("failed", 0)
+            if failed > 0:
+                errs = result.get("errors", [])
+                messagebox.showerror(
+                    "Löschfehler",
+                    f"{deleted} OK, {failed} Fehler:\n" + "\n".join(errs[:5]))
+                self._stop_loading(f"❌ {deleted} gelöscht, {failed} Fehler")
+            else:
+                # Lokal aus tab entfernen
+                tab.rows = [r for r in tab.rows if r[barcode_idx] not in barcodes]
+                tab.refresh()
+                self._stop_loading(f"✓ {deleted} Paket(e) gelöscht")
+
+        _th.Thread(target=_worker, daemon=True).start()
+
     def _after_abhol_set(self, result, new_status: str):
         ok     = result.get("ok", [])
         failed = result.get("failed", [])
@@ -6884,6 +6965,11 @@ class App(tk.Tk):
         menu.add_command(label="↩  Retoure",  command=self._abhol_set_retoure)
         menu.add_command(label="✗  Storno",   command=self._abhol_set_storno)
         menu.add_command(label="✓  Abgeholt", command=self._abhol_set_abgeholt)
+        menu.add_separator()
+        menu.add_command(
+            label="🗑  Aus Abholer_DB löschen",
+            command=lambda: self._delete_rows_from_abholer_db(self.tab_abhol, 0),
+        )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -6908,6 +6994,11 @@ class App(tk.Tk):
         menu.add_command(label="↩  Retoure",  command=self._older_set_retoure)
         menu.add_command(label="✗  Storno",   command=self._older_set_storno)
         menu.add_command(label="✓  Abgeholt", command=self._older_set_abgeholt)
+        menu.add_separator()
+        menu.add_command(
+            label="🗑  Aus Abholer_DB löschen",
+            command=lambda: self._delete_rows_from_abholer_db(self.tab_older, 0),
+        )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -6932,6 +7023,11 @@ class App(tk.Tk):
         menu.add_command(label="↩  Retoure",  command=self._kissel_set_retoure)
         menu.add_command(label="✗  Storno",   command=self._kissel_set_storno)
         menu.add_command(label="✓  Abgeholt", command=self._kissel_set_abgeholt)
+        menu.add_separator()
+        menu.add_command(
+            label="🗑  Aus Abholer_DB löschen",
+            command=lambda: self._delete_rows_from_abholer_db(self.tab_kissel, 0),
+        )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
