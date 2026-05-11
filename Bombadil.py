@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.24"
+VERSION = "1.0.25"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4214,7 +4214,7 @@ class PickupHeuteTab:
     _COL_WIDTHS  = [48, 220, 240, 110, 60, 155, 155, 120]
 
     _COLOR_TOUR1 = "#ccdaf5"   # blau – Tour 1
-    _COLOR_TOUR2 = "#c4dfd0"   # grün – Tour 2
+    _COLOR_TOUR2 = "#e5d4f0"   # lavendel – Tour 2 (gut unterscheidbar von Abholbereit-Grün)
 
     # Zeilenfarben – zeigen wo im Prozess das PU gerade steckt
     _COLOR_ABHOLBEREIT = "#bdd8c8"   # salbeigrün  – am Standort angekommen
