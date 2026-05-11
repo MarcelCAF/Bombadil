@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.22"
+VERSION = "1.0.23"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -5754,45 +5754,25 @@ class App(tk.Tk):
             [("barcode", "Paket-Barcode", 230), ("name", "Name", 400),
              ("dt", "Abholbereit_At", 175), ("kiosk", "Ziel-Kiosk", 130), ("wt", "Wartezeit", 90)],
             row_color_fn=_older7_color,
+            legend_items=[
+                ("#fef3e2", "7–14 Tage"),
+                ("#f8d7da", "15–30 Tage"),
+                ("#a93226", "> 30 Tage"),
+            ],
         )
         self.nb.add(self.tab_older.frame, text="  > 7 Tage  ")
 
-        _b = tk.Button(self.tab_older.btn_frame, text="↩  Retoure",
-                       command=self._older_set_retoure,
-                       bg="#e8a44a", fg="white", activebackground="#d08830",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(8, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Retoure' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_older.btn_frame, text="✗  Storno",
-                       command=self._older_set_storno,
-                       bg="#d96b6b", fg="white", activebackground="#c04848",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Storno' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_older.btn_frame, text="✓  Abgeholt",
-                       command=self._older_set_abgeholt,
-                       bg="#4ea874", fg="white", activebackground="#37855a",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Abgeholt' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
+        # Standard-Buttons (Kopieren, Suche leeren) entfernen
+        for _w in list(self.tab_older.btn_frame.winfo_children()):
+            _w.destroy()
 
-        # Farblegende > 7 Tage
-        _leg7 = tk.Frame(self.tab_older.btn_frame)
-        _leg7.pack(side="right", padx=(12, 0))
-        tk.Label(_leg7, text="Legende:", font=("Segoe UI", 8)).pack(side="left", padx=(0, 6))
-        for _bg, _fg, _txt in [("#fef3e2", "black", "7–14 Tage"),
-                                ("#f8d7da", "black", "15–30 Tage"),
-                                ("#a93226", "white", "> 30 Tage")]:
-            _box = tk.Frame(_leg7, bg=_bg, width=14, height=14, relief="solid", bd=1)
-            _box.pack(side="left", padx=(0, 2))
-            _box.pack_propagate(False)
-            tk.Label(_leg7, text=_txt, font=("Segoe UI", 8), fg=_fg).pack(side="left", padx=(0, 8))
+        # Rechtsklick → Kontextmenü
+        if self.tab_older.sheet:
+            try:
+                self.tab_older.sheet.disable_bindings("sort_columns")
+            except Exception:
+                pass
+            self.tab_older.sheet.bind("<Button-3>", self._older_right_click)
 
         # 7. Kissel > 2W
         def _kissel_color(row):
@@ -5812,45 +5792,25 @@ class App(tk.Tk):
             [("barcode", "Paket-Barcode", 230), ("name", "Name", 400),
              ("dt", "Abholbereit_At", 175), ("kiosk", "Ziel-Kiosk", 130), ("wt", "Wartezeit", 90)],
             row_color_fn=_kissel_color,
+            legend_items=[
+                ("#fef3e2", "2–6 Wochen"),
+                ("#f8d7da", "> 6 Wochen"),
+                ("#a93226", "> 3 Monate"),
+            ],
         )
         self.nb.add(self.tab_kissel.frame, text="  Kissel > 2W  ")
 
-        _b = tk.Button(self.tab_kissel.btn_frame, text="↩  Retoure",
-                       command=self._kissel_set_retoure,
-                       bg="#e8a44a", fg="white", activebackground="#d08830",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(8, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Retoure' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_kissel.btn_frame, text="✗  Storno",
-                       command=self._kissel_set_storno,
-                       bg="#d96b6b", fg="white", activebackground="#c04848",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Storno' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
-        _b = tk.Button(self.tab_kissel.btn_frame, text="✓  Abgeholt",
-                       command=self._kissel_set_abgeholt,
-                       bg="#4ea874", fg="white", activebackground="#37855a",
-                       activeforeground="white", font=("Segoe UI", 9, "bold"),
-                       relief="flat", padx=10, pady=3, cursor="hand2")
-        _b.pack(side="left", padx=(4, 0))
-        add_tooltip(_b, "Markierte Pakete in OrcaScan auf 'Abgeholt' setzen.\n"
-                        "Zeile(n) in der Tabelle markieren, dann klicken.")
+        # Standard-Buttons (Kopieren, Suche leeren) entfernen
+        for _w in list(self.tab_kissel.btn_frame.winfo_children()):
+            _w.destroy()
 
-        # Farblegende Kissel
-        _leg_kissel = tk.Frame(self.tab_kissel.btn_frame)
-        _leg_kissel.pack(side="right", padx=(12, 0))
-        tk.Label(_leg_kissel, text="Legende:", font=("Segoe UI", 8)).pack(side="left", padx=(0, 6))
-        for _bg, _fg, _txt in [("#fef3e2", "black", "3–6 Wochen"),
-                                ("#f8d7da", "black", "> 6 Wochen"),
-                                ("#a93226", "white", "> 3 Monate")]:
-            _box = tk.Frame(_leg_kissel, bg=_bg, width=14, height=14, relief="solid", bd=1)
-            _box.pack(side="left", padx=(0, 2))
-            _box.pack_propagate(False)
-            tk.Label(_leg_kissel, text=_txt, font=("Segoe UI", 8), fg=_fg).pack(side="left", padx=(0, 8))
+        # Rechtsklick → Kontextmenü
+        if self.tab_kissel.sheet:
+            try:
+                self.tab_kissel.sheet.disable_bindings("sort_columns")
+            except Exception:
+                pass
+            self.tab_kissel.sheet.bind("<Button-3>", self._kissel_right_click)
 
         # 8. Unstimmigkeiten (Verpackt aber nicht im Tagesbote)
         self._unstimmigkeiten_updates = []   # (row_id, barcode, name) für OrcaScan
@@ -6331,6 +6291,15 @@ class App(tk.Tk):
             )
         if not updates:
             return
+
+        # Sicherheitsfrage bei Mehrfach-Aktion (> 3 Zeilen)
+        if len(updates) > 3:
+            if not messagebox.askyesno(
+                "Sicherheitsfrage",
+                f"Du möchtest {len(updates)} Pakete auf '{new_status}' setzen.\n\n"
+                "Bist du sicher?",
+            ):
+                return
 
         def _worker():
             result = update_rows_orca_bulk(updates, {"location": new_status})
@@ -6915,6 +6884,54 @@ class App(tk.Tk):
         menu.add_command(label="↩  Retoure",  command=self._abhol_set_retoure)
         menu.add_command(label="✗  Storno",   command=self._abhol_set_storno)
         menu.add_command(label="✓  Abgeholt", command=self._abhol_set_abgeholt)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _older_right_click(self, event):
+        """Rechtsklick auf > 7 Tage → Kontextmenü mit Retoure / Storno / Abgeholt."""
+        sheet = self.tab_older.sheet
+        try:
+            row_idx = sheet.identify_row(event, allow_end=False)
+        except Exception:
+            return
+        if row_idx is None:
+            return
+        if row_idx not in self.tab_older.get_selected_rows():
+            try:
+                sheet.deselect("all")
+                sheet.select_row(row_idx)
+            except Exception:
+                pass
+        menu = tk.Menu(self.nb, tearoff=0)
+        menu.add_command(label="↩  Retoure",  command=self._older_set_retoure)
+        menu.add_command(label="✗  Storno",   command=self._older_set_storno)
+        menu.add_command(label="✓  Abgeholt", command=self._older_set_abgeholt)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _kissel_right_click(self, event):
+        """Rechtsklick auf Kissel > 2W → Kontextmenü mit Retoure / Storno / Abgeholt."""
+        sheet = self.tab_kissel.sheet
+        try:
+            row_idx = sheet.identify_row(event, allow_end=False)
+        except Exception:
+            return
+        if row_idx is None:
+            return
+        if row_idx not in self.tab_kissel.get_selected_rows():
+            try:
+                sheet.deselect("all")
+                sheet.select_row(row_idx)
+            except Exception:
+                pass
+        menu = tk.Menu(self.nb, tearoff=0)
+        menu.add_command(label="↩  Retoure",  command=self._kissel_set_retoure)
+        menu.add_command(label="✗  Storno",   command=self._kissel_set_storno)
+        menu.add_command(label="✓  Abgeholt", command=self._kissel_set_abgeholt)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
