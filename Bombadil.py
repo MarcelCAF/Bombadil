@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.25"
+VERSION = "1.0.26"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4708,13 +4708,9 @@ class PickupHeuteTab:
         if tz.get("t2"):
             return
         jetzt = (_dt.datetime.now()).strftime("%H:%M")
-        # t1_barcodes vom Netzlaufwerk verwenden falls verfuegbar (konsistente Basis)
-        t1_bc = set(netz.get("t1_barcodes") or tz.get("t1_barcodes") or [])
-        # Pakete mit Packstatus "Offen" gehoeren weder in T1 noch in T2
-        t2_barcodes = [r["barcode"] for r in self._all_rows
-                       if r["barcode"] not in t1_bc
-                       and r.get("tb_status", "").lower() != "offen"]
-        _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=t2_barcodes)
+        # T2 nutzt KEINEN Snapshot mehr – die Tour-Zuweisung erfolgt live bei
+        # jedem Reload anhand "nicht in T1 + verpackt = T2"
+        _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=[])
         self._restore_tour_buttons()
         self._recompute_tours_local()
         self._upload_tourliste("T2")
@@ -4865,20 +4861,25 @@ class PickupHeuteTab:
         _th.Thread(target=worker, daemon=True).start()
 
     def _recompute_tours_local(self):
-        """Weist Touren per gespeicherter Barcode-Liste zu und aktualisiert die UI."""
+        """Tour-Zuweisung live (kein T2-Snapshot mehr):
+        - In t1_barcodes  → T1 (fixer Snapshot vom T1-Klick)
+        - Sonst, verpackt → T2 (sobald T2 gedrückt wurde)
+        - Offen / sonst   → keine Tour
+        """
         if not self._all_rows:
             return
-        tz    = _load_tour_zeiten()
-        t1_bc = set(tz.get("t1_barcodes") or [])
-        t2_bc = set(tz.get("t2_barcodes") or [])
+        tz       = _load_tour_zeiten()
+        t1_bc    = set(tz.get("t1_barcodes") or [])
+        t2_gesetzt = bool(tz.get("t2"))
+
         for r in self._all_rows:
             bc = r["barcode"]
-            # Pakete mit Packstatus "Offen" bekommen keine Toureinteilung
-            if r.get("tb_status", "").lower() == "offen":
+            status = r.get("tb_status", "").lower()
+            if status == "offen":
                 r["tour"] = ""
             elif bc in t1_bc:
                 r["tour"] = "T1"
-            elif bc in t2_bc:
+            elif t2_gesetzt and status == "verpackt":
                 r["tour"] = "T2"
             else:
                 r["tour"] = ""
@@ -4912,17 +4913,20 @@ class PickupHeuteTab:
             # Erst ohne Cutoff laden um Roh-Timestamps zu bekommen
             rows, diag = compute_pickup_heute(abholer_df, tagesbote_df, t2_cutoff=None)
 
-            # Tour-Zuweisung nur per gespeicherter Barcode-Liste (kein Scan-Zeit-Vergleich)
-            # Pakete mit Packstatus "Offen" bekommen keine Toureinteilung
-            _t1_bc = set(_tz.get("t1_barcodes") or [])
-            _t2_bc = set(_tz.get("t2_barcodes") or [])
+            # Tour-Zuweisung live:
+            # - In t1_barcodes  → T1 (fixer Snapshot vom T1-Klick)
+            # - Sonst, verpackt → T2 (sobald T2 gedrückt wurde)
+            # - Offen / sonst   → keine Tour
+            _t1_bc       = set(_tz.get("t1_barcodes") or [])
+            _t2_gesetzt  = bool(_tz.get("t2"))
             for _r in rows:
-                _bc = _r["barcode"]
-                if _r.get("tb_status", "").lower() == "offen":
+                _bc     = _r["barcode"]
+                _status = _r.get("tb_status", "").lower()
+                if _status == "offen":
                     _r["tour"] = ""
                 elif _bc in _t1_bc:
                     _r["tour"] = "T1"
-                elif _bc in _t2_bc:
+                elif _t2_gesetzt and _status == "verpackt":
                     _r["tour"] = "T2"
 
             self.frame.after(0, lambda r=rows, d=diag: self._apply(r, d))
