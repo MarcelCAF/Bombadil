@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.30"
+VERSION = "1.0.31"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -240,6 +240,29 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
                 "t1_barcodes": t1_barcodes if t1_barcodes is not None else tz.get("t1_barcodes", []),
                 "t2_barcodes": t2_barcodes if t2_barcodes is not None else tz.get("t2_barcodes", []),
             }), encoding="utf-8")
+    except Exception:
+        pass
+
+# ── Monatsziel (PU-Statistik) ───────────────────────────────────────────────
+def _load_monthly_goal() -> int:
+    """Liest das eingestellte Monatsziel aus settings.json. 0 = kein Ziel."""
+    try:
+        if SETTINGS_FILE.exists():
+            data = _json_mod.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            return int(data.get("monthly_goal", 0) or 0)
+    except Exception:
+        pass
+    return 0
+
+def _save_monthly_goal(value: int):
+    """Speichert das Monatsziel in settings.json (merge mit existierenden Keys)."""
+    try:
+        data = {}
+        if SETTINGS_FILE.exists():
+            data = _json_mod.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        data["monthly_goal"] = int(value or 0)
+        SETTINGS_FILE.write_text(
+            _json_mod.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -856,11 +879,17 @@ def add_working_days(d: date, n: int) -> date:
     return current
 
 
+import threading as _threading
+_OAUTH_LOCK = _threading.Lock()
+
 def _get_oauth_drive_service():
     """
     Gibt einen authentifizierten Google Drive Service zurück (OAuth2).
     Beim ersten Aufruf öffnet sich ein Browser-Fenster zur Anmeldung.
     Das Token wird in token.json gespeichert und danach automatisch erneuert.
+
+    Thread-sicher: Nur ein OAuth-Flow läuft parallel. Weitere Aufrufe warten
+    und nutzen anschließend das frisch gespeicherte Token.
     """
     if not OAUTH_AVAILABLE:
         raise RuntimeError(
@@ -876,39 +905,41 @@ def _get_oauth_drive_service():
             "3. JSON herunterladen → als 'oauth_credentials.json' im Bombadil-Ordner speichern"
         )
 
-    import io as _io
-    creds = None
+    # Lock verhindert parallele OAuth-Flows (sonst 5x dieselbe URL-Aufforderung,
+    # wenn mehrere Background-Threads gleichzeitig Drive nutzen wollen).
+    with _OAUTH_LOCK:
+        creds = None
 
-    # Gespeichertes Token laden (falls vorhanden)
-    if OAUTH_TOKEN_FILE.exists():
-        try:
-            with open(OAUTH_TOKEN_FILE, "rb") as fh:
-                creds = _pickle.load(fh)
-        except Exception:
-            creds = None
-
-    # Token abgelaufen → automatisch erneuern
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(_GAuthRequest())
-        except Exception as _ref_err:
-            # Token widerrufen oder abgelaufen (invalid_grant) → löschen, neu einloggen
+        # Gespeichertes Token laden (falls vorhanden)
+        if OAUTH_TOKEN_FILE.exists():
             try:
-                OAUTH_TOKEN_FILE.unlink(missing_ok=True)
+                with open(OAUTH_TOKEN_FILE, "rb") as fh:
+                    creds = _pickle.load(fh)
             except Exception:
-                pass
-            creds = None
+                creds = None
 
-    if not creds or not creds.valid:
-        # Kein gültiges Token → Browser öffnet sich für neuen Login
-        flow  = InstalledAppFlow.from_client_secrets_file(
-            str(OAUTH_CREDENTIALS_FILE), GDRIVE_UPLOAD_SCOPES
-        )
-        creds = flow.run_local_server(port=0)
+        # Token abgelaufen → automatisch erneuern
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(_GAuthRequest())
+            except Exception:
+                # Token widerrufen / abgelaufen → löschen, neu einloggen
+                try:
+                    OAUTH_TOKEN_FILE.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                creds = None
 
-    # Token speichern für nächsten Start
-    with open(OAUTH_TOKEN_FILE, "wb") as fh:
-        _pickle.dump(creds, fh)
+        if not creds or not creds.valid:
+            # Kein gültiges Token → Browser öffnet sich für neuen Login
+            flow  = InstalledAppFlow.from_client_secrets_file(
+                str(OAUTH_CREDENTIALS_FILE), GDRIVE_UPLOAD_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        # Token speichern für nächsten Start
+        with open(OAUTH_TOKEN_FILE, "wb") as fh:
+            _pickle.dump(creds, fh)
 
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
@@ -2101,11 +2132,22 @@ class TableTab:
         # Mausrad-Scroll: vom ganzen Frame an tksheet weiterleiten
         if self.sheet is not None:
             def _mw(e):
-                self.sheet.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                try:
+                    self.sheet.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                except Exception:
+                    pass
             def _bind_mw(w):
-                w.bind("<MouseWheel>", _mw, add="+")
-                for ch in w.winfo_children():
-                    _bind_mw(ch)
+                # bind kann bei internen tksheet-Widgets fehlschlagen
+                # (AttributeError: 'Sheet' has no attribute 'MT')
+                try:
+                    w.bind("<MouseWheel>", _mw, add="+")
+                except Exception:
+                    return
+                try:
+                    for ch in w.winfo_children():
+                        _bind_mw(ch)
+                except Exception:
+                    pass
             self.frame.bind("<Map>", lambda e: _bind_mw(self.frame), add="+")
 
     # ------------------------------------------------------------------ helpers
@@ -2631,6 +2673,28 @@ class StatistikTab:
         pu_toggle_frame.pack(side="right")
         self._pu_toggle_btns = {}
 
+        # Monatsziel-Eingabe (nur bei Monatsansicht sichtbar)
+        self._monthly_goal_frame = tk.Frame(chart_hdr_pu, bg=self._COL_BG)
+        # gepackt erst beim Wechsel auf monthly (siehe _pu_switch_view)
+        tk.Label(self._monthly_goal_frame, text="🎯 Monatsziel:",
+                 font=("Segoe UI", 9), bg=self._COL_BG, fg="#2c3e50"
+                 ).pack(side="left", padx=(0, 4))
+        self._monthly_goal_var = tk.StringVar(value=str(_load_monthly_goal() or ""))
+        _goal_entry = tk.Entry(self._monthly_goal_frame,
+                               textvariable=self._monthly_goal_var,
+                               width=7, font=("Segoe UI", 9),
+                               justify="right")
+        _goal_entry.pack(side="left", padx=(0, 6))
+        def _on_goal_change(*_):
+            try:
+                v = int(self._monthly_goal_var.get() or 0)
+            except ValueError:
+                v = 0
+            _save_monthly_goal(v)
+            self._pu_redraw_chart()
+        _goal_entry.bind("<FocusOut>", _on_goal_change)
+        _goal_entry.bind("<Return>",   _on_goal_change)
+
         def _pu_switch_view(mode):
             self._pu_view_mode.set(mode)
             titles = {"weekly": "Letzte 4 Kalenderwochen",
@@ -2641,6 +2705,12 @@ class StatistikTab:
                 b.config(bg="#2c3e50" if m == mode else "#dde2e8",
                          fg="white"   if m == mode else "#2c3e50",
                          relief="sunken" if m == mode else "flat")
+            # Monatsziel-Eingabe nur bei Monatsansicht zeigen
+            if mode == "monthly":
+                self._monthly_goal_frame.pack(side="right", padx=(0, 12),
+                                              before=pu_toggle_frame)
+            else:
+                self._monthly_goal_frame.pack_forget()
             self._pu_redraw_chart()
 
         for _mode, _label, _active in [("daily", "Tagesansicht", False),
@@ -3221,6 +3291,14 @@ class StatistikTab:
         bar_area_w = canvas_w - PAD_LEFT - PAD_RIGHT
         max_cnt = max(max(na, nb) for _, na, nb in data) or 1
 
+        # Monatsziel: bei Monatsansicht in die Skalierung einbeziehen, damit
+        # die Linie immer im Chart liegt (auch wenn Ziel > höchster Balken)
+        goal = 0
+        if view == "monthly":
+            goal = _load_monthly_goal()
+            if goal > max_cnt:
+                max_cnt = goal
+
         group_h = 2 * BAR_H + BAR_GAP
 
         for i, (label, n_anlief, n_abhol) in enumerate(data):
@@ -3254,6 +3332,20 @@ class StatistikTab:
             c.create_text(PAD_LEFT + bw2 + 6, y2 + BAR_H // 2,
                           text=f"📦 {n_abhol}", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#283593")
+
+        # ── Ziel-Linie bei Monatsansicht ────────────────────────────────────
+        if view == "monthly" and goal > 0:
+            x_goal = PAD_LEFT + int(goal / max_cnt * bar_area_w)
+            y_top    = PAD_TOP - 4
+            y_bottom = PAD_TOP + len(data) * (group_h + GROUP_GAP) - GROUP_GAP + 4
+            # Gestrichelte rote Linie
+            c.create_line(x_goal, y_top, x_goal, y_bottom,
+                          fill="#c0392b", width=2, dash=(5, 3))
+            # Beschriftung oben
+            c.create_text(x_goal, y_top - 4,
+                          text=f"🎯 Ziel: {goal}",
+                          anchor="s", font=("Segoe UI", 9, "bold"),
+                          fill="#c0392b")
 
         # Canvas-Höhe anpassen
         needed_h = PAD_TOP + len(data) * (group_h + GROUP_GAP)
@@ -7372,9 +7464,18 @@ class App(tk.Tk):
 
     def _save_settings(self):
         import json as _json
-        data = {"export_folder": str(self.export_folder),
-                "last_backup_date": self.last_backup_date,
-                "tourlisten_folder_id": self.tourlisten_folder_id}
+        # Merge mit existierenden Settings, damit andere Keys (z.B. monthly_goal)
+        # nicht ueberschrieben werden.
+        data = {}
+        try:
+            if SETTINGS_FILE.exists():
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+        except Exception:
+            pass
+        data.update({"export_folder": str(self.export_folder),
+                     "last_backup_date": self.last_backup_date,
+                     "tourlisten_folder_id": self.tourlisten_folder_id})
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 _json.dump(data, f, indent=2, ensure_ascii=False)
