@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.26"
+VERSION = "1.0.27"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4660,16 +4660,16 @@ class PickupHeuteTab:
 
     # ── Tour-Abfahrt Steuerung ────────────────────────────────────────────
     def _lese_netz_tour_zeiten(self):
-        """Liest tour_zeiten JSON direkt vom Netzlaufwerk (synchron). Gibt {} zurueck wenn nicht gefunden."""
-        import datetime as _dt, json as _json
+        """Liest tour_zeiten JSON von Google Drive (synchron). Gibt {} zurueck wenn nicht gefunden.
+        Drive-Sync funktioniert auch fuer Standorte ohne NAS-Zugriff (W:)."""
+        import datetime as _dt
         heute = (_dt.datetime.now()).strftime("%Y-%m-%d")
-        pfad = TOURLISTEN_DIR / f"tour_zeiten_{heute}.json"
+        filename = f"tour_zeiten_{heute}.json"
         try:
-            if pfad.exists():
-                return _json.loads(pfad.read_text(encoding="utf-8"))
+            data = download_json_from_gdrive(GDRIVE_FOLDER_ID, filename)
+            return data or {}
         except Exception:
-            pass
-        return {}
+            return {}
 
     def _set_t1_abfahrt(self):
         import datetime as _dt
@@ -4820,31 +4820,29 @@ class PickupHeuteTab:
     # \u2500\u2500 Tour-Zeiten Drive-Sync \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def _upload_tour_zeiten_to_drive(self):
         """L\u00e4dt die heutigen tour_zeiten als JSON nach Google Drive hoch (Hintergrund-Thread).
-        So sehen andere Bombadil-Instanzen sofort welche Tour abgefahren ist."""
-        import datetime as _dt, threading as _th, json as _json
+        Andere Bombadil-Instanzen (auch ohne NAS-Zugriff) k\u00f6nnen sie via Drive synchronisieren."""
+        import datetime as _dt, threading as _th
         heute    = (_dt.datetime.now()).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         tz       = _load_tour_zeiten()
         def worker():
             try:
-                TOURLISTEN_DIR.mkdir(parents=True, exist_ok=True)
-                pfad = TOURLISTEN_DIR / filename
-                pfad.write_text(_json.dumps(tz, ensure_ascii=False), encoding="utf-8")
+                upload_json_to_gdrive(tz, GDRIVE_FOLDER_ID, filename)
             except Exception as e:
-                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
+                self.frame.after(0, lambda err=str(e): self.status_lbl.config(
+                    text=f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _sync_tour_zeiten_from_drive(self):
-        """Liest tour_zeiten-JSON vom Netzlaufwerk. Remote-Daten gewinnen immer."""
-        import datetime as _dt, threading as _th, json as _json
+        """Liest tour_zeiten-JSON von Google Drive. Remote-Daten gewinnen immer."""
+        import datetime as _dt, threading as _th
         heute    = (_dt.datetime.now()).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         def worker():
             try:
-                pfad = TOURLISTEN_DIR / filename
-                if not pfad.exists():
+                remote = download_json_from_gdrive(GDRIVE_FOLDER_ID, filename)
+                if not remote:
                     return
-                remote = _json.loads(pfad.read_text(encoding="utf-8"))
                 if not remote.get("t1") and not remote.get("t2"):
                     return
                 # Remote-Daten immer anwenden (ueberschreiben lokale)
@@ -4857,7 +4855,8 @@ class PickupHeuteTab:
                 self.frame.after(0, lambda t1=remote.get("t1"), t2=remote.get("t2"): self.status_lbl.config(
                     text=f"\u2705 Tour-Sync: T1={t1 or '-'}  T2={t2 or '-'}"))
             except Exception as e:
-                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"\u26a0 Sync-Fehler: {err}"))
+                self.frame.after(0, lambda err=str(e): self.status_lbl.config(
+                    text=f"\u26a0 Sync-Fehler: {err}"))
         _th.Thread(target=worker, daemon=True).start()
 
     def _recompute_tours_local(self):
