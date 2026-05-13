@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.29"
+VERSION = "1.0.30"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3141,6 +3141,10 @@ class StatistikTab:
             c.create_text(PAD_LEFT - 8, y_mid, text=kiosk,
                           anchor="e", font=("Segoe UI", 9, "bold"), fill="#2c3e50")
 
+            # Schätzung wieviel Platz die Zahl rechts vom Balken braucht
+            # (Emoji + Ziffern); wenn nicht genug Platz → Zahl im Balken
+            _RESERVE = 55
+
             # Bar 1: Lieferungen (teal)
             bw1 = max(int(n_anlief / max_val * bar_area_w), 4) if n_anlief else 0
             c.create_rectangle(PAD_LEFT, y0, PAD_LEFT + bar_area_w, y0 + BAR_H,
@@ -3148,9 +3152,15 @@ class StatistikTab:
             if bw1:
                 c.create_rectangle(PAD_LEFT, y0, PAD_LEFT + bw1, y0 + BAR_H,
                                    fill=self._COL_ANLIEF, outline="")
-            c.create_text(PAD_LEFT + bw1 + 6, y0 + BAR_H // 2,
-                          text=f"🚐 {n_anlief}", anchor="w",
-                          font=("Segoe UI", 9, "bold"), fill="#117a65")
+            if PAD_LEFT + bw1 + _RESERVE > canvas_w - PAD_RIGHT and bw1 > _RESERVE:
+                # Zahl passt nicht mehr rechts → innen am rechten Balkenrand
+                c.create_text(PAD_LEFT + bw1 - 6, y0 + BAR_H // 2,
+                              text=f"🚐 {n_anlief}", anchor="e",
+                              font=("Segoe UI", 9, "bold"), fill="white")
+            else:
+                c.create_text(PAD_LEFT + bw1 + 6, y0 + BAR_H // 2,
+                              text=f"🚐 {n_anlief}", anchor="w",
+                              font=("Segoe UI", 9, "bold"), fill="#117a65")
 
             # Bar 2: Abholungen (indigo)
             y2  = y0 + BAR_H + BAR_GAP
@@ -3160,9 +3170,14 @@ class StatistikTab:
             if bw2:
                 c.create_rectangle(PAD_LEFT, y2, PAD_LEFT + bw2, y2 + BAR_H,
                                    fill=self._COL_ABHOL, outline="")
-            c.create_text(PAD_LEFT + bw2 + 6, y2 + BAR_H // 2,
-                          text=f"📦 {n_abhol}", anchor="w",
-                          font=("Segoe UI", 9, "bold"), fill="#283593")
+            if PAD_LEFT + bw2 + _RESERVE > canvas_w - PAD_RIGHT and bw2 > _RESERVE:
+                c.create_text(PAD_LEFT + bw2 - 6, y2 + BAR_H // 2,
+                              text=f"📦 {n_abhol}", anchor="e",
+                              font=("Segoe UI", 9, "bold"), fill="white")
+            else:
+                c.create_text(PAD_LEFT + bw2 + 6, y2 + BAR_H // 2,
+                              text=f"📦 {n_abhol}", anchor="w",
+                              font=("Segoe UI", 9, "bold"), fill="#283593")
 
         # Summenzeile
         y_sum = PAD_TOP + len(data_rows) * (2 * BAR_H + BAR_GAP + GROUP_GAP)
