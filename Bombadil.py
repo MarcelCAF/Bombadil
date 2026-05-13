@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.28"
+VERSION = "1.0.29"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4455,6 +4455,49 @@ class PickupHeuteTab:
         # Automatischer erster Load 2 Sekunden nach Programmstart
         self.frame.after(2000, self._run)
 
+    def _on_header_click(self, event):
+        """Spaltenheader klicken: 1x aufsteigend, 2x absteigend, 3x Standard zurück."""
+        try:
+            col = event.selected.column
+        except Exception:
+            return
+        if col is None:
+            return
+        _sortable = {0, 1, 2, 3, 5, 6, 7}
+        if col not in _sortable:
+            return
+        if self._sort_col == col:
+            self._sort_dir = (self._sort_dir + 1) % 3
+            if self._sort_dir == 0:
+                self._sort_col = None
+        else:
+            self._sort_col = col
+            self._sort_dir = 1
+        self._update_sort_headers()
+        self._refresh_ui()
+        # Selektion zurücksetzen, sonst feuert column_select beim erneuten Klick
+        # auf dieselbe Spalte nicht (tksheet ignoriert "Selektion unverändert").
+        try:
+            self._sheet.deselect("all")
+        except Exception:
+            pass
+
+    def _update_sort_headers(self):
+        """Aktualisiert die Header-Beschriftung mit Sortier-Pfeil (↑ ↓)."""
+        if not self._sheet:
+            return
+        headers = []
+        for i, label in enumerate(self._COL_HEADERS):
+            if i == self._sort_col and self._sort_dir > 0:
+                arrow = " ↑" if self._sort_dir == 1 else " ↓"
+                headers.append(label + arrow)
+            else:
+                headers.append(label)
+        try:
+            self._sheet.headers(newheaders=headers)
+        except Exception:
+            pass
+
     def _on_cell_click(self, event):
         """Barcode der angeklickten Zeile in die Zwischenablage kopieren."""
         try:
@@ -5121,6 +5164,7 @@ class PickupHeuteTab:
         ]
         self._last_data = data
         self._sheet.set_sheet_data(data)
+        self._update_sort_headers()
 
         # Kopfzeilen-Zaehler aktualisieren (Tour 1/2 immer aus _all_rows)
         if self._all_rows:
