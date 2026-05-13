@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.27"
+VERSION = "1.0.28"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -240,6 +240,32 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
                 "t1_barcodes": t1_barcodes if t1_barcodes is not None else tz.get("t1_barcodes", []),
                 "t2_barcodes": t2_barcodes if t2_barcodes is not None else tz.get("t2_barcodes", []),
             }), encoding="utf-8")
+    except Exception:
+        pass
+
+# ── Tagesbote-Cache (für nachmittägliche Säuberung des OrcaScan-Sheets) ─────
+def _tagesbote_cache_pfad():
+    """Pro-Tag-Cache der PU-heute-Rows. Reset automatisch um Mitternacht."""
+    import datetime as _dt_tb
+    heute = (_dt_tb.datetime.now()).strftime("%Y-%m-%d")
+    return BASE_DIR / f"tagesbote_cache_{heute}.json"
+
+def _load_tagesbote_cache() -> list:
+    """Letzter bekannter Tagesbote-Snapshot des heutigen Tages. Leer wenn keiner."""
+    try:
+        p = _tagesbote_cache_pfad()
+        if p.exists():
+            return _json_mod.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+def _save_tagesbote_cache(rows: list):
+    """Speichert die PU-heute-Rows als JSON für späteres Recovery."""
+    try:
+        _tagesbote_cache_pfad().write_text(
+            _json_mod.dumps(rows, ensure_ascii=False, default=str),
+            encoding="utf-8")
     except Exception:
         pass
 
@@ -4912,6 +4938,21 @@ class PickupHeuteTab:
             # Erst ohne Cutoff laden um Roh-Timestamps zu bekommen
             rows, diag = compute_pickup_heute(abholer_df, tagesbote_df, t2_cutoff=None)
 
+            # Tagesbote-Cache: wenn der OrcaScan-Sheet nachmittags gesaeubert
+            # wird, fallen die PUs aus der Anzeige. Wir cachen daher den
+            # letzten guten Stand pro Tag und stellen ihn wieder her wenn
+            # das Sheet leer oder stark reduziert ist (< 50% des Cache).
+            _cached = _load_tagesbote_cache()
+            _from_cache = False
+            if _cached and (len(rows) == 0 or len(rows) < len(_cached) * 0.5):
+                rows = _cached
+                _from_cache = True
+                diag = {"n_raw": len(_cached), "from_cache": True,
+                        "n_dedup_drop": 0, "dup_barcodes": [], "n_empty_bc": 0}
+            else:
+                # Aktueller Stand ist plausibel → Cache aktualisieren
+                _save_tagesbote_cache(rows)
+
             # Tour-Zuweisung live:
             # - In t1_barcodes  → T1 (fixer Snapshot vom T1-Klick)
             # - Sonst, verpackt → T2 (sobald T2 gedrückt wurde)
@@ -4981,18 +5022,23 @@ class PickupHeuteTab:
 
         # Diagnose: Doppelte / leere Barcodes anzeigen
         if diag:
-            _warn_parts = []
-            if diag.get("n_empty_bc", 0):
-                _warn_parts.append(f"{diag['n_empty_bc']} leere(r) Barcode(s) übersprungen")
-            if diag.get("n_dedup_drop", 0):
-                _dups_str = ", ".join(diag.get("dup_barcodes", []))
-                _warn_parts.append(
-                    f"{diag['n_dedup_drop']} Duplikat(e) entfernt"
-                    + (f": {_dups_str}" if _dups_str else "")
-                )
-            if _warn_parts:
-                _status_text = f"⚠  {' · '.join(_warn_parts)}  (Sheet: {diag['n_raw']}, angezeigt: {n_gesamt})"
-                _status_fg   = "#e67e22"
+            if diag.get("from_cache"):
+                _status_text = (f"📦  Tagesbote-Sheet leer (gesäubert) – "
+                                f"zeige Cache-Stand ({n_gesamt} PUs)")
+                _status_fg   = "#3498db"
+            else:
+                _warn_parts = []
+                if diag.get("n_empty_bc", 0):
+                    _warn_parts.append(f"{diag['n_empty_bc']} leere(r) Barcode(s) übersprungen")
+                if diag.get("n_dedup_drop", 0):
+                    _dups_str = ", ".join(diag.get("dup_barcodes", []))
+                    _warn_parts.append(
+                        f"{diag['n_dedup_drop']} Duplikat(e) entfernt"
+                        + (f": {_dups_str}" if _dups_str else "")
+                    )
+                if _warn_parts:
+                    _status_text = f"⚠  {' · '.join(_warn_parts)}  (Sheet: {diag['n_raw']}, angezeigt: {n_gesamt})"
+                    _status_fg   = "#e67e22"
 
         self.status_lbl.config(text=_status_text, fg=_status_fg)
         self._restore_tour_buttons()   # Button-Status nach Laden aktualisieren
