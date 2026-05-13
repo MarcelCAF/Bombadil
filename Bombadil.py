@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.31"
+VERSION = "1.0.32"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -973,42 +973,68 @@ def upload_excel_to_gdrive(df: pd.DataFrame, folder_id: str, filename: str):
     ).execute()
 
 
+def _get_drive_service_preferred():
+    """Liefert Drive-Service: bevorzugt Service Account (kein User-Login).
+    Fallback: OAuth (falls service_account.json fehlt). Bei Shared-Drive-
+    Operationen muss der Aufrufer supportsAllDrives=True setzen."""
+    # 1. Service Account bevorzugt (kein Browser-Login, funktioniert headless)
+    if SERVICE_ACCOUNT_FILE.exists() and GDRIVE_AVAILABLE:
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(SERVICE_ACCOUNT_FILE), scopes=GDRIVE_SCOPES)
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
+        except Exception:
+            pass
+    # 2. Fallback: OAuth
+    return _get_oauth_drive_service()
+
+
 def upload_json_to_gdrive(data: dict, folder_id: str, filename: str):
-    """Lädt ein dict als JSON-Datei nach Google Drive hoch (überschreibt gleichnamige Datei)."""
+    """Lädt ein dict als JSON-Datei nach Google Drive hoch (überschreibt gleichnamige Datei).
+    Nutzt Service Account wenn verfügbar – kein User-Login nötig."""
     if not GDRIVE_AVAILABLE:
         return
     import io as _io
-    service = _get_oauth_drive_service()
+    service = _get_drive_service_preferred()
     content = _json_mod.dumps(data, ensure_ascii=False).encode("utf-8")
     # Alte Datei gleichen Namens löschen (Drive erlaubt Duplikate → wir wollen nur eine)
     q = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
-    existing = service.files().list(q=q, fields="files(id)", pageSize=5).execute()
+    existing = service.files().list(
+        q=q, fields="files(id)", pageSize=5,
+        supportsAllDrives=True, includeItemsFromAllDrives=True,
+    ).execute()
     for f in existing.get("files", []):
         try:
-            service.files().delete(fileId=f["id"]).execute()
+            service.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
         except Exception:
             pass
     buf = _io.BytesIO(content)
     metadata = {"name": filename, "parents": [folder_id]}
     media = MediaIoBaseUpload(buf, mimetype="application/json", resumable=False)
-    service.files().create(body=metadata, media_body=media, fields="id").execute()
+    service.files().create(
+        body=metadata, media_body=media, fields="id",
+        supportsAllDrives=True,
+    ).execute()
 
 
 def download_json_from_gdrive(folder_id: str, filename: str) -> "dict | None":
-    """Lädt eine JSON-Datei aus Google Drive herunter. Gibt None zurück wenn nicht gefunden."""
+    """Lädt eine JSON-Datei aus Google Drive herunter. Gibt None zurück wenn nicht gefunden.
+    Nutzt Service Account wenn verfügbar – kein User-Login nötig."""
     if not GDRIVE_AVAILABLE:
         return None
     try:
-        service = _get_oauth_drive_service()
+        service = _get_drive_service_preferred()
         q = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
         res = service.files().list(
             q=q, fields="files(id)", pageSize=5,
             orderBy="modifiedTime desc",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute()
         files = res.get("files", [])
         if not files:
             return None
-        content = service.files().get_media(fileId=files[0]["id"]).execute()
+        content = service.files().get_media(
+            fileId=files[0]["id"], supportsAllDrives=True).execute()
         return _json_mod.loads(content.decode("utf-8"))
     except Exception:
         return None
