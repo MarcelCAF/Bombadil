@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.32"
+VERSION = "1.0.33"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -243,24 +243,41 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
     except Exception:
         pass
 
-# ── Monatsziel (PU-Statistik) ───────────────────────────────────────────────
-def _load_monthly_goal() -> int:
-    """Liest das eingestellte Monatsziel aus settings.json. 0 = kein Ziel."""
+# ── Monatsziele (PU + DHL Statistik) – pro Monat individuell ───────────────
+def _goals_key(category: str) -> str:
+    """settings.json-Key für Ziele einer Kategorie ("pu" oder "dhl")."""
+    if category == "dhl":
+        return "monthly_goals_dhl"
+    return "monthly_goals"   # PU bleibt unter dem alten Key (backward compat)
+
+def _load_monthly_goals(category: str = "pu") -> dict:
+    """Liest pro-Monat-Ziele aus settings.json. Format: {"YYYY-MM": int, ...}"""
     try:
         if SETTINGS_FILE.exists():
             data = _json_mod.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            return int(data.get("monthly_goal", 0) or 0)
+            goals = data.get(_goals_key(category), {})
+            if isinstance(goals, dict):
+                return {k: int(v) for k, v in goals.items()
+                        if isinstance(v, (int, float)) and int(v) > 0}
     except Exception:
         pass
-    return 0
+    return {}
 
-def _save_monthly_goal(value: int):
-    """Speichert das Monatsziel in settings.json (merge mit existierenden Keys)."""
+def _save_monthly_goal(month_key: str, value: int, category: str = "pu"):
+    """Setzt das Ziel für einen Monat (YYYY-MM). value=0 löscht den Eintrag."""
     try:
         data = {}
         if SETTINGS_FILE.exists():
             data = _json_mod.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        data["monthly_goal"] = int(value or 0)
+        key = _goals_key(category)
+        goals = data.get(key, {})
+        if not isinstance(goals, dict):
+            goals = {}
+        if value and int(value) > 0:
+            goals[month_key] = int(value)
+        else:
+            goals.pop(month_key, None)
+        data[key] = goals
         SETTINGS_FILE.write_text(
             _json_mod.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -2699,27 +2716,14 @@ class StatistikTab:
         pu_toggle_frame.pack(side="right")
         self._pu_toggle_btns = {}
 
-        # Monatsziel-Eingabe (nur bei Monatsansicht sichtbar)
+        # Monatsziel-Hinweis (nur bei Monatsansicht sichtbar)
+        # Eingabe erfolgt per Klick auf eine Zeile im Chart → Popup
         self._monthly_goal_frame = tk.Frame(chart_hdr_pu, bg=self._COL_BG)
-        # gepackt erst beim Wechsel auf monthly (siehe _pu_switch_view)
-        tk.Label(self._monthly_goal_frame, text="🎯 Monatsziel:",
-                 font=("Segoe UI", 9), bg=self._COL_BG, fg="#2c3e50"
-                 ).pack(side="left", padx=(0, 4))
-        self._monthly_goal_var = tk.StringVar(value=str(_load_monthly_goal() or ""))
-        _goal_entry = tk.Entry(self._monthly_goal_frame,
-                               textvariable=self._monthly_goal_var,
-                               width=7, font=("Segoe UI", 9),
-                               justify="right")
-        _goal_entry.pack(side="left", padx=(0, 6))
-        def _on_goal_change(*_):
-            try:
-                v = int(self._monthly_goal_var.get() or 0)
-            except ValueError:
-                v = 0
-            _save_monthly_goal(v)
-            self._pu_redraw_chart()
-        _goal_entry.bind("<FocusOut>", _on_goal_change)
-        _goal_entry.bind("<Return>",   _on_goal_change)
+        tk.Label(self._monthly_goal_frame,
+                 text="🎯 Klick auf Monat → Ziel eingeben",
+                 font=("Segoe UI", 9, "italic"),
+                 bg=self._COL_BG, fg="#7f8c8d"
+                 ).pack(side="left", padx=(0, 6))
 
         def _pu_switch_view(mode):
             self._pu_view_mode.set(mode)
@@ -2754,6 +2758,7 @@ class StatistikTab:
         self._pu_canvas = tk.Canvas(chart_col, bg=self._COL_BG, height=260, highlightthickness=0)
         self._pu_canvas.pack(fill="both", expand=True, pady=(4, 0))
         self._pu_canvas.bind("<Configure>", lambda e: self._pu_redraw_chart())
+        self._pu_canvas.bind("<Button-1>", self._on_chart_click)
 
         # Vertikaler Trenner
         tk.Frame(pu_side, bg="#dde2e8", width=1).pack(side="left", fill="y", padx=(12, 12))
@@ -2869,6 +2874,14 @@ class StatistikTab:
         dhl_toggle_frame.pack(side="right")
         self._dhl_toggle_btns = {}
 
+        # Monatsziel-Hinweis DHL (nur bei Monatsansicht sichtbar)
+        self._dhl_goal_hint = tk.Frame(chart_hdr_dhl, bg=self._COL_BG)
+        tk.Label(self._dhl_goal_hint,
+                 text="🎯 Klick auf Monat → Ziel eingeben",
+                 font=("Segoe UI", 9, "italic"),
+                 bg=self._COL_BG, fg="#7f8c8d"
+                 ).pack(side="left", padx=(0, 6))
+
         def _dhl_switch_view(mode):
             self._dhl_view_mode.set(mode)
             titles = {"daily":   "Letzte 4 Wochen – Tagesansicht",
@@ -2879,6 +2892,11 @@ class StatistikTab:
                 b.config(bg="#2c3e50" if m == mode else "#dde2e8",
                          fg="white"   if m == mode else "#2c3e50",
                          relief="sunken" if m == mode else "flat")
+            if mode == "monthly":
+                self._dhl_goal_hint.pack(side="right", padx=(0, 12),
+                                         before=dhl_toggle_frame)
+            else:
+                self._dhl_goal_hint.pack_forget()
             self._dhl_redraw_chart()
 
         for _mode, _label, _active in [("daily", "Tagesansicht", False),
@@ -2896,6 +2914,7 @@ class StatistikTab:
         self._dhl_canvas = tk.Canvas(self._inner, bg=self._COL_BG, height=260, highlightthickness=0)
         self._dhl_canvas.pack(fill="x", padx=20, pady=(4, 24))
         self._dhl_canvas.bind("<Configure>", lambda e: self._dhl_redraw_chart())
+        self._dhl_canvas.bind("<Button-1>", self._on_dhl_chart_click)
 
         self._bind_mousewheel = _bind_mousewheel
 
@@ -3128,9 +3147,10 @@ class StatistikTab:
             else:
                 me = ms.replace(month=ms.month + 1, day=1)
             label_m = ms.strftime("%b %y")   # z.B. "Mär 26"
+            key_m   = ms.strftime("%Y-%m")    # z.B. "2026-03" → für Ziele
             na_m = count_in_range(c_verpackt_at, ms, me)
             nb_m = count_in_range("_abhol_eff",  ms, me)
-            monthly.append((label_m, na_m, nb_m))
+            monthly.append((label_m, na_m, nb_m, key_m))
 
         self._pu_monthly_data = monthly
 
@@ -3315,19 +3335,23 @@ class StatistikTab:
 
         canvas_w = c.winfo_width() or 820
         bar_area_w = canvas_w - PAD_LEFT - PAD_RIGHT
-        max_cnt = max(max(na, nb) for _, na, nb in data) or 1
+        max_cnt = max(max(row[1], row[2]) for row in data) or 1
 
-        # Monatsziel: bei Monatsansicht in die Skalierung einbeziehen, damit
-        # die Linie immer im Chart liegt (auch wenn Ziel > höchster Balken)
-        goal = 0
+        # Monatsziele: bei Monatsansicht in die Skalierung einbeziehen, damit
+        # die Linien immer im Chart liegen (auch wenn Ziel > höchster Balken)
+        monthly_goals = {}
         if view == "monthly":
-            goal = _load_monthly_goal()
-            if goal > max_cnt:
-                max_cnt = goal
+            monthly_goals = _load_monthly_goals()
+            if monthly_goals:
+                max_goal = max(monthly_goals.values())
+                if max_goal > max_cnt:
+                    max_cnt = max_goal
 
         group_h = 2 * BAR_H + BAR_GAP
 
-        for i, (label, n_anlief, n_abhol) in enumerate(data):
+        for i, row in enumerate(data):
+            label, n_anlief, n_abhol = row[0], row[1], row[2]
+            mkey = row[3] if len(row) > 3 else None
             y0 = PAD_TOP + i * (group_h + GROUP_GAP)
             y_mid = y0 + group_h // 2
 
@@ -3359,23 +3383,63 @@ class StatistikTab:
                           text=f"📦 {n_abhol}", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#283593")
 
-        # ── Ziel-Linie bei Monatsansicht ────────────────────────────────────
-        if view == "monthly" and goal > 0:
-            x_goal = PAD_LEFT + int(goal / max_cnt * bar_area_w)
-            y_top    = PAD_TOP - 4
-            y_bottom = PAD_TOP + len(data) * (group_h + GROUP_GAP) - GROUP_GAP + 4
-            # Gestrichelte rote Linie
-            c.create_line(x_goal, y_top, x_goal, y_bottom,
-                          fill="#c0392b", width=2, dash=(5, 3))
-            # Beschriftung oben
-            c.create_text(x_goal, y_top - 4,
-                          text=f"🎯 Ziel: {goal}",
-                          anchor="s", font=("Segoe UI", 9, "bold"),
-                          fill="#c0392b")
+            # ── Ziel-Linie pro Monat (nur Monatsansicht) ───────────────────
+            if view == "monthly" and mkey:
+                _goal = monthly_goals.get(mkey, 0)
+                if _goal > 0:
+                    x_goal = PAD_LEFT + int(_goal / max_cnt * bar_area_w)
+                    # Linie über die zwei Balken dieser Zeile
+                    c.create_line(x_goal, y0 - 2, x_goal, y0 + group_h + 2,
+                                  fill="#c0392b", width=2, dash=(4, 3))
+                    # Ziel-Beschriftung am Linienkopf
+                    c.create_text(x_goal + 2, y0 - 4,
+                                  text=f"🎯 {_goal}", anchor="sw",
+                                  font=("Segoe UI", 8, "bold"),
+                                  fill="#c0392b")
 
         # Canvas-Höhe anpassen
         needed_h = PAD_TOP + len(data) * (group_h + GROUP_GAP)
         c.config(height=max(needed_h + 10, 120))
+
+    def _on_chart_click(self, event):
+        """Klick auf Monats-Zeile im Chart → Ziel-Eingabe-Dialog."""
+        if self._pu_view_mode.get() != "monthly":
+            return
+        data = self._pu_monthly_data
+        if not data:
+            return
+        # Gleiche Geometrie-Konstanten wie in _pu_redraw_chart (monthly)
+        PAD_TOP   = 14
+        BAR_H     = 20
+        BAR_GAP   = 3
+        GROUP_GAP = 18
+        group_h   = 2 * BAR_H + BAR_GAP
+        row_h     = group_h + GROUP_GAP
+        rel_y     = event.y - PAD_TOP
+        if rel_y < 0:
+            return
+        idx = int(rel_y // row_h)
+        if idx < 0 or idx >= len(data):
+            return
+        row = data[idx]
+        if len(row) < 4:
+            return
+        label, _, _, mkey = row[0], row[1], row[2], row[3]
+        self._edit_monthly_goal_dialog(mkey, label)
+
+    def _edit_monthly_goal_dialog(self, month_key: str, label: str):
+        """Popup zum Bearbeiten des Monatsziels für einen bestimmten Monat."""
+        from tkinter import simpledialog
+        goals = _load_monthly_goals()
+        current = goals.get(month_key, 0)
+        new = simpledialog.askinteger(
+            "Monatsziel",
+            f"Ziel für {label} setzen:\n(0 oder leer = kein Ziel)",
+            initialvalue=current, minvalue=0, maxvalue=1_000_000)
+        if new is None:
+            return  # abgebrochen
+        _save_monthly_goal(month_key, new)
+        self._pu_redraw_chart()
 
     def _pu_redraw_chart_daily(self, data):
         _WOCHENTAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -3558,7 +3622,8 @@ class StatistikTab:
             monthly.append((ms.strftime("%b %y"),
                             count(normal_dates,   ms, me),
                             count(express_dates,  ms, me),
-                            count(abholung_dates, ms, me)))
+                            count(abholung_dates, ms, me),
+                            ms.strftime("%Y-%m")))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
         self._bind_mousewheel(self._inner)
@@ -3597,10 +3662,22 @@ class StatistikTab:
 
         canvas_w   = c.winfo_width() or 820
         bar_area_w = canvas_w - PAD_LEFT - PAD_RIGHT
-        max_cnt    = max(max(na, nb, nc) for _, na, nb, nc in data) or 1
+        max_cnt    = max(max(row[1], row[2], row[3]) for row in data) or 1
+
+        # Monatsziele DHL: in Skalierung einbeziehen
+        dhl_goals = {}
+        if view == "monthly":
+            dhl_goals = _load_monthly_goals("dhl")
+            if dhl_goals:
+                max_goal = max(dhl_goals.values())
+                if max_goal > max_cnt:
+                    max_cnt = max_goal
+
         group_h    = 3 * BAR_H + 2 * BAR_GAP
 
-        for i, (label, n_normal, n_express, n_abholung) in enumerate(data):
+        for i, row in enumerate(data):
+            label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
+            mkey = row[4] if len(row) > 4 else None
             y0    = PAD_TOP + i * (group_h + GROUP_GAP)
             y_mid = y0 + group_h // 2
 
@@ -3647,8 +3724,55 @@ class StatistikTab:
                           text=f"🏃 {n_abholung}", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#1b5e20")
 
+            # ── Ziel-Linie pro Monat (nur Monatsansicht) ───────────────────
+            if view == "monthly" and mkey:
+                _goal = dhl_goals.get(mkey, 0)
+                if _goal > 0:
+                    x_goal = PAD_LEFT + int(_goal / max_cnt * bar_area_w)
+                    c.create_line(x_goal, y0 - 2, x_goal, y0 + group_h + 2,
+                                  fill="#c0392b", width=2, dash=(4, 3))
+                    c.create_text(x_goal + 2, y0 - 4,
+                                  text=f"🎯 {_goal}", anchor="sw",
+                                  font=("Segoe UI", 8, "bold"),
+                                  fill="#c0392b")
+
         needed_h = PAD_TOP + len(data) * (group_h + GROUP_GAP)
         c.config(height=max(needed_h + 10, 120))
+
+    def _on_dhl_chart_click(self, event):
+        """Klick auf Monats-Zeile im DHL-Chart → Ziel-Eingabe-Dialog."""
+        if self._dhl_view_mode.get() != "monthly":
+            return
+        data = self._dhl_monthly_data
+        if not data:
+            return
+        PAD_TOP   = 14
+        BAR_H     = 20
+        BAR_GAP   = 3
+        GROUP_GAP = 18
+        group_h   = 3 * BAR_H + 2 * BAR_GAP   # DHL hat 3 Balken pro Gruppe
+        row_h     = group_h + GROUP_GAP
+        rel_y     = event.y - PAD_TOP
+        if rel_y < 0:
+            return
+        idx = int(rel_y // row_h)
+        if idx < 0 or idx >= len(data):
+            return
+        row = data[idx]
+        if len(row) < 5:
+            return
+        label, mkey = row[0], row[4]
+        from tkinter import simpledialog
+        goals = _load_monthly_goals("dhl")
+        current = goals.get(mkey, 0)
+        new = simpledialog.askinteger(
+            "DHL Monatsziel",
+            f"DHL-Ziel für {label} setzen:\n(0 oder leer = kein Ziel)",
+            initialvalue=current, minvalue=0, maxvalue=1_000_000)
+        if new is None:
+            return
+        _save_monthly_goal(mkey, new, category="dhl")
+        self._dhl_redraw_chart()
 
     def _dhl_redraw_chart_daily(self, data):
         _WOCHENTAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
