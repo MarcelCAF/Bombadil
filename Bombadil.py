@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.34"
+VERSION = "1.0.35"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -1008,11 +1008,13 @@ def _get_drive_service_preferred():
 
 def upload_json_to_gdrive(data: dict, folder_id: str, filename: str):
     """Lädt ein dict als JSON-Datei nach Google Drive hoch (überschreibt gleichnamige Datei).
-    Nutzt Service Account wenn verfügbar – kein User-Login nötig."""
+    Nutzt OAuth (User-Login), weil Service Accounts in normalen Drive-Ordnern
+    keinen Storage-Quota haben. Nur der "Master"-PC (Marcel) muss sich einmal
+    einloggen, alle anderen können via Service Account herunterladen."""
     if not GDRIVE_AVAILABLE:
         return
     import io as _io
-    service = _get_drive_service_preferred()
+    service = _get_oauth_drive_service()
     content = _json_mod.dumps(data, ensure_ascii=False).encode("utf-8")
     # Alte Datei gleichen Namens löschen (Drive erlaubt Duplikate → wir wollen nur eine)
     q = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
