@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.33"
+VERSION = "1.0.34"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3662,18 +3662,26 @@ class StatistikTab:
 
         canvas_w   = c.winfo_width() or 820
         bar_area_w = canvas_w - PAD_LEFT - PAD_RIGHT
-        max_cnt    = max(max(row[1], row[2], row[3]) for row in data) or 1
 
-        # Monatsziele DHL: in Skalierung einbeziehen
+        # Bei Monatsansicht: Skala an den SUMMEN ausrichten (Normal+Express+
+        # Abholung), weil das Ziel sich auf die Gesamtsumme bezieht.
+        # Bei Wochenansicht: Skala = max(Einzelbalken) wie bisher.
         dhl_goals = {}
         if view == "monthly":
             dhl_goals = _load_monthly_goals("dhl")
-            if dhl_goals:
-                max_goal = max(dhl_goals.values())
-                if max_goal > max_cnt:
-                    max_cnt = max_goal
+            max_sum  = max((row[1] + row[2] + row[3]) for row in data) or 1
+            max_goal = max(dhl_goals.values()) if dhl_goals else 0
+            max_cnt  = max(max_sum, max_goal, 1)
+        else:
+            max_cnt = max(max(row[1], row[2], row[3]) for row in data) or 1
 
-        group_h    = 3 * BAR_H + 2 * BAR_GAP
+        # In Monatsansicht zusätzlich einen "Gesamt"-Balken (4. Reihe)
+        SUM_BAR_H = 12
+        SUM_GAP   = 4
+        if view == "monthly":
+            group_h = 3 * BAR_H + 2 * BAR_GAP + SUM_GAP + SUM_BAR_H
+        else:
+            group_h = 3 * BAR_H + 2 * BAR_GAP
 
         for i, row in enumerate(data):
             label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
@@ -3724,17 +3732,34 @@ class StatistikTab:
                           text=f"🏃 {n_abholung}", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#1b5e20")
 
-            # ── Ziel-Linie pro Monat (nur Monatsansicht) ───────────────────
-            if view == "monthly" and mkey:
-                _goal = dhl_goals.get(mkey, 0)
-                if _goal > 0:
-                    x_goal = PAD_LEFT + int(_goal / max_cnt * bar_area_w)
-                    c.create_line(x_goal, y0 - 2, x_goal, y0 + group_h + 2,
-                                  fill="#c0392b", width=2, dash=(4, 3))
-                    c.create_text(x_goal + 2, y0 - 4,
-                                  text=f"🎯 {_goal}", anchor="sw",
-                                  font=("Segoe UI", 8, "bold"),
-                                  fill="#c0392b")
+            # ── Gesamt-Balken + Ziel-Linie (nur Monatsansicht) ─────────────
+            if view == "monthly":
+                n_sum = n_normal + n_express + n_abholung
+                y_sum = y3 + BAR_H + SUM_GAP
+                bw_s  = max(int(n_sum / max_cnt * bar_area_w), 4) if n_sum else 0
+                # Hintergrund + dunkler Gesamt-Balken
+                c.create_rectangle(PAD_LEFT, y_sum, PAD_LEFT + bar_area_w,
+                                   y_sum + SUM_BAR_H,
+                                   fill="#cfd8dc", outline="")
+                if bw_s:
+                    c.create_rectangle(PAD_LEFT, y_sum, PAD_LEFT + bw_s,
+                                       y_sum + SUM_BAR_H,
+                                       fill="#37474f", outline="")
+                c.create_text(PAD_LEFT + bw_s + 6, y_sum + SUM_BAR_H // 2,
+                              text=f"∑ {n_sum}", anchor="w",
+                              font=("Segoe UI", 9, "bold"), fill="#37474f")
+
+                # Ziel-Linie pro Monat (gegen Summen-Skala)
+                if mkey:
+                    _goal = dhl_goals.get(mkey, 0)
+                    if _goal > 0:
+                        x_goal = PAD_LEFT + int(_goal / max_cnt * bar_area_w)
+                        c.create_line(x_goal, y0 - 2, x_goal, y0 + group_h + 2,
+                                      fill="#c0392b", width=2, dash=(4, 3))
+                        c.create_text(x_goal + 2, y0 - 4,
+                                      text=f"🎯 {_goal}", anchor="sw",
+                                      font=("Segoe UI", 8, "bold"),
+                                      fill="#c0392b")
 
         needed_h = PAD_TOP + len(data) * (group_h + GROUP_GAP)
         c.config(height=max(needed_h + 10, 120))
@@ -3750,7 +3775,10 @@ class StatistikTab:
         BAR_H     = 20
         BAR_GAP   = 3
         GROUP_GAP = 18
-        group_h   = 3 * BAR_H + 2 * BAR_GAP   # DHL hat 3 Balken pro Gruppe
+        SUM_BAR_H = 12
+        SUM_GAP   = 4
+        # In Monatsansicht: 3 normale Balken + Gesamt-Balken
+        group_h   = 3 * BAR_H + 2 * BAR_GAP + SUM_GAP + SUM_BAR_H
         row_h     = group_h + GROUP_GAP
         rel_y     = event.y - PAD_TOP
         if rel_y < 0:
