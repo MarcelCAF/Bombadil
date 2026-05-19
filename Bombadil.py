@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.35"
+VERSION = "1.0.36"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -1353,7 +1353,7 @@ def compute_tagesboten_abgleich(abholer_source, tagesbote_df: "pd.DataFrame"):
         return "" if pd.isna(v) else str(v).strip()
 
     for _, r in pickup_verpackt.iterrows():
-        bc = str(r[tb_barcode]).strip()
+        bc = clean_barcode(r[tb_barcode])
         if not bc or bc.lower() == "nan":
             continue
 
@@ -1509,7 +1509,10 @@ def compute_pickup_heute(abholer_df: "pd.DataFrame", tagesbote_df: "pd.DataFrame
     rows = []
     _n_empty_bc = 0
     for _, r in tb.iterrows():
-        bc = str(r[tb_barcode]).strip()
+        # Gleiche Bereinigung wie für Abholer_DB, sonst scheitern Float-
+        # Barcodes ("158892672.0" vs "158892672") beim Lookup → falsche
+        # "nicht in DB"-Anzeige.
+        bc = clean_barcode(r[tb_barcode])
         if not bc or bc.lower() == "nan":
             _n_empty_bc += 1
             continue
@@ -5268,20 +5271,8 @@ class PickupHeuteTab:
             # Erst ohne Cutoff laden um Roh-Timestamps zu bekommen
             rows, diag = compute_pickup_heute(abholer_df, tagesbote_df, t2_cutoff=None)
 
-            # Tagesbote-Cache: wenn der OrcaScan-Sheet nachmittags gesaeubert
-            # wird, fallen die PUs aus der Anzeige. Wir cachen daher den
-            # letzten guten Stand pro Tag und stellen ihn wieder her wenn
-            # das Sheet leer oder stark reduziert ist (< 50% des Cache).
-            _cached = _load_tagesbote_cache()
-            _from_cache = False
-            if _cached and (len(rows) == 0 or len(rows) < len(_cached) * 0.5):
-                rows = _cached
-                _from_cache = True
-                diag = {"n_raw": len(_cached), "from_cache": True,
-                        "n_dedup_drop": 0, "dup_barcodes": [], "n_empty_bc": 0}
-            else:
-                # Aktueller Stand ist plausibel → Cache aktualisieren
-                _save_tagesbote_cache(rows)
+            # (Tagesbote-Cache deaktiviert – Marcel will immer die echten
+            # OrcaScan-Daten sehen, auch wenn das Sheet gerade leer ist.)
 
             # Tour-Zuweisung live:
             # - In t1_barcodes  → T1 (fixer Snapshot vom T1-Klick)
@@ -5352,23 +5343,18 @@ class PickupHeuteTab:
 
         # Diagnose: Doppelte / leere Barcodes anzeigen
         if diag:
-            if diag.get("from_cache"):
-                _status_text = (f"📦  Tagesbote-Sheet leer (gesäubert) – "
-                                f"zeige Cache-Stand ({n_gesamt} PUs)")
-                _status_fg   = "#3498db"
-            else:
-                _warn_parts = []
-                if diag.get("n_empty_bc", 0):
-                    _warn_parts.append(f"{diag['n_empty_bc']} leere(r) Barcode(s) übersprungen")
-                if diag.get("n_dedup_drop", 0):
-                    _dups_str = ", ".join(diag.get("dup_barcodes", []))
-                    _warn_parts.append(
-                        f"{diag['n_dedup_drop']} Duplikat(e) entfernt"
-                        + (f": {_dups_str}" if _dups_str else "")
-                    )
-                if _warn_parts:
-                    _status_text = f"⚠  {' · '.join(_warn_parts)}  (Sheet: {diag['n_raw']}, angezeigt: {n_gesamt})"
-                    _status_fg   = "#e67e22"
+            _warn_parts = []
+            if diag.get("n_empty_bc", 0):
+                _warn_parts.append(f"{diag['n_empty_bc']} leere(r) Barcode(s) übersprungen")
+            if diag.get("n_dedup_drop", 0):
+                _dups_str = ", ".join(diag.get("dup_barcodes", []))
+                _warn_parts.append(
+                    f"{diag['n_dedup_drop']} Duplikat(e) entfernt"
+                    + (f": {_dups_str}" if _dups_str else "")
+                )
+            if _warn_parts:
+                _status_text = f"⚠  {' · '.join(_warn_parts)}  (Sheet: {diag['n_raw']}, angezeigt: {n_gesamt})"
+                _status_fg   = "#e67e22"
 
         self.status_lbl.config(text=_status_text, fg=_status_fg)
         self._restore_tour_buttons()   # Button-Status nach Laden aktualisieren
