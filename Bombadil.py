@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.36"
+VERSION = "1.0.37"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4551,7 +4551,6 @@ class PickupHeuteTab:
         self._last_load_date  = None              # Datum des letzten erfolgreichen Loads
         self._refresh_job     = None              # after()-Job für Auto-Refresh
         self._all_rows        = []                # Alle geladenen Zeilen (leer bis erster Load)
-        self._tb_panel_visible = False
 
         self.frame = tk.Frame(parent)
 
@@ -4579,12 +4578,6 @@ class PickupHeuteTab:
             btn_row, text="🔄  Jetzt laden", command=self._run
         )
         self.b_laden.pack(side="left")
-
-        self.b_tagesbote = tk.Button(
-            btn_row, text="📋  Tagesbote ▶",
-            command=self._toggle_tagesbote_panel
-        )
-        self.b_tagesbote.pack(side="left", padx=(6, 0))
 
         self.status_lbl = tk.Label(
             btn_row, text="Noch nicht geladen.",
@@ -4655,18 +4648,7 @@ class PickupHeuteTab:
         # ── Hauptbereich: Tabelle + Legende nebeneinander ────────────────
         body = tk.Frame(self.frame)
         body.pack(fill="both", expand=True)
-        self._body = body   # Referenz für Toggle-Panel
-
-        # ── Tagesboten-Seitenpanel (rechts, zunächst versteckt) ──────────
-        self._tb_panel = tk.Frame(body, bd=1, relief="groove", width=430)
-        self._tb_panel.pack_propagate(False)
-        self._tb_abgleich = TagesbotenAbgleichTab(
-            self._tb_panel,
-            get_abholer_df    = self.get_abholer_df,
-            get_export_folder = self.get_export_folder,
-        )
-        self._tb_abgleich.frame.pack(fill="both", expand=True)
-        # Panel bleibt zunächst versteckt (kein pack-Aufruf)
+        self._body = body
 
         # ── Legende (rechts, feste Breite) ───────────────────────────────
         legend = tk.Frame(body, bg="#f5f5f5", bd=1, relief="groove", width=170)
@@ -4840,7 +4822,7 @@ class PickupHeuteTab:
                 command=lambda: self._set_kontrollstatus(r, "Offen")
             )
 
-        # ── Abholbereit + Löschen (Abholer_DB) ─────────────────────────
+        # ── Abholbereit + Status + Löschen (Abholer_DB) ────────────────
         if r.get("_db_id"):
             if r.get("_tb_row_id"):
                 menu.add_separator()
@@ -4852,8 +4834,30 @@ class PickupHeuteTab:
             )
             menu.add_separator()
             menu.add_command(
+                label="↩  Retoure",
+                command=lambda: self._set_db_status(r, "Retoure")
+            )
+            menu.add_command(
+                label="✗  Storno",
+                command=lambda: self._set_db_status(r, "Storno")
+            )
+            menu.add_command(
+                label="✓  Abgeholt",
+                command=lambda: self._set_db_status(r, "Abgeholt")
+            )
+            menu.add_separator()
+            menu.add_command(
                 label="🗑️  Aus Abholer_DB löschen",
                 command=lambda: self._delete_from_db(r)
+            )
+
+        # ── In Abholer_DB übertragen (nur wenn nicht in DB) ────────────
+        if r.get("_tb_row_id") and not r.get("_db_id"):
+            if menu.index("end") is not None:
+                menu.add_separator()
+            menu.add_command(
+                label="📥  In Abholer_DB übertragen",
+                command=lambda: self._transfer_to_abholer_db(r)
             )
 
         if menu.index("end") is None:
@@ -4913,26 +4917,6 @@ class PickupHeuteTab:
 
         _thr.Thread(target=_worker, daemon=True).start()
 
-    def _toggle_tagesbote_panel(self):
-        """Tagesboten-Seitenpanel ein-/ausklappen."""
-        if self._tb_panel_visible:
-            self._tb_panel.pack_forget()
-            self._tb_panel_visible = False
-            self.b_tagesbote.config(text="📋  Tagesbote ▶")
-        else:
-            # Sheet kurz entfernen, damit der Pack-Manager Platz neu verteilt.
-            # (Das Sheet hat expand=True und hat sonst bereits den ganzen Platz
-            #  beansprucht, bevor das Panel eingeblendet wird.)
-            if self._sheet:
-                self._sheet.pack_forget()
-            self._tb_panel.pack(in_=self._body, side="right",
-                                fill="y", padx=(4, 0), pady=(0, 6))
-            if self._sheet:
-                self._sheet.pack(fill="both", expand=True,
-                                 padx=(4, 0), pady=(0, 6))
-            self._tb_panel_visible = True
-            self.b_tagesbote.config(text="◀  Tagesbote")
-
     def _set_abholbereit_single(self, r):
         """Einzelne Zeile per Rechtsklick auf Abholbereit setzen."""
         import threading as _thr
@@ -4963,6 +4947,77 @@ class PickupHeuteTab:
                 self._refresh_ui()
                 self.status_lbl.config(
                     text=f"✓  '{r['barcode']}' auf Abholbereit gesetzt", fg="#27ae60")
+
+        _thr.Thread(target=_worker, daemon=True).start()
+
+    def _set_db_status(self, r, new_status: str):
+        """Setzt location (Paketstatus) für eine einzelne Zeile in Abholer_DB."""
+        if not r.get("_db_id"):
+            return
+        import threading as _thr
+        self.status_lbl.config(
+            text=f"⏳  Setze '{r['barcode']}' → {new_status} …", fg="#e67e22")
+
+        def _worker():
+            result = update_rows_orca_bulk(
+                [(r["_db_id"], r["barcode"], r.get("name") or "")],
+                {"location": new_status},
+                sheet_id=ORCA_ABHOLER_SHEET_ID)
+            self.frame.after(0, lambda: _done(result))
+
+        def _done(result):
+            if result.get("failed"):
+                err = result["failed"][0] if result["failed"] else ""
+                self.status_lbl.config(
+                    text=f"❌  {new_status} fehlgeschlagen: {err[:60]}",
+                    fg="#c0392b")
+                return
+            # Lokale Aktualisierung
+            for row in self._all_rows:
+                if row.get("_db_id") == r["_db_id"]:
+                    row["db_status"] = new_status.lower()
+                    break
+            self._refresh_ui()
+            self.status_lbl.config(
+                text=f"✓  '{r['barcode']}' → {new_status}", fg="#27ae60")
+
+        _thr.Thread(target=_worker, daemon=True).start()
+
+    def _transfer_to_abholer_db(self, r):
+        """Erzeugt eine neue Zeile in Abholer_DB aus den Tagesboten-Daten."""
+        from tkinter import messagebox
+        if r.get("_db_id"):
+            messagebox.showinfo(
+                "Bereits vorhanden",
+                f"Paket '{r['barcode']}' ist bereits in Abholer_DB.")
+            return
+        import threading as _thr, datetime as _dt
+        self.status_lbl.config(
+            text=f"⏳  Übertrage '{r['barcode']}' in Abholer_DB …", fg="#e67e22")
+
+        def _worker():
+            row_data = [{
+                "barcode":          r["barcode"],
+                "receipiantName":   r.get("name") or "",
+                "zielu002dkiosk":   r.get("zielkiosk") or "",
+                "location":         "Verpackt",
+                "datum":            _dt.datetime.now().strftime("%Y-%m-%d"),
+            }]
+            result = create_rows_orca_bulk(row_data, sheet_id=ORCA_ABHOLER_SHEET_ID)
+            self.frame.after(0, lambda: _done(result))
+
+        def _done(result):
+            if result.get("failed"):
+                err = result["failed"][0] if result["failed"] else ""
+                self.status_lbl.config(
+                    text=f"❌  Übertragung fehlgeschlagen: {err[:60]}",
+                    fg="#c0392b")
+                return
+            self.status_lbl.config(
+                text=f"✓  '{r['barcode']}' nach Abholer_DB übertragen – lade neu …",
+                fg="#27ae60")
+            # Frischer Reload, damit neue _db_id ankommt
+            self._run()
 
         _thr.Thread(target=_worker, daemon=True).start()
 
