@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.37"
+VERSION = "1.0.38"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -5016,7 +5016,9 @@ class PickupHeuteTab:
             self.status_lbl.config(
                 text=f"✓  '{r['barcode']}' nach Abholer_DB übertragen – lade neu …",
                 fg="#27ae60")
-            # Frischer Reload, damit neue _db_id ankommt
+            # Frischer Reload mit Abholer_DB direkt aus OrcaScan, damit die
+            # neue _db_id bekannt wird (Cache enthält die noch nicht).
+            self._force_reload_abholer = True
             self._run()
 
         _thr.Thread(target=_worker, daemon=True).start()
@@ -5310,11 +5312,21 @@ class PickupHeuteTab:
 
     def _worker(self):
         try:
-            abholer_df = self.get_abholer_df() if self.get_abholer_df else None
-            if abholer_df is None or abholer_df.empty:
+            # Force-Reload-Flag: nach _transfer_to_abholer_db muss die
+            # Abholer_DB frisch von OrcaScan kommen (Cache enthält die neue
+            # Zeile noch nicht), sonst zeigt PU heute weiter ✗.
+            _force = bool(getattr(self, "_force_reload_abholer", False))
+            if _force:
+                self._force_reload_abholer = False
                 self.frame.after(0, lambda: self.status_lbl.config(
-                    text="⏳  Lade Abholer_DB aus OrcaScan …"))
+                    text="⏳  Lade Abholer_DB frisch aus OrcaScan …"))
                 abholer_df = fetch_abholer_orca()
+            else:
+                abholer_df = self.get_abholer_df() if self.get_abholer_df else None
+                if abholer_df is None or abholer_df.empty:
+                    self.frame.after(0, lambda: self.status_lbl.config(
+                        text="⏳  Lade Abholer_DB aus OrcaScan …"))
+                    abholer_df = fetch_abholer_orca()
 
             self.frame.after(0, lambda: self.status_lbl.config(
                 text="⏳  Lade Tagesbote-Sheet …"))
