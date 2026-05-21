@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.38"
+VERSION = "1.0.39"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -309,6 +309,9 @@ def _save_tagesbote_cache(rows: list):
     except Exception:
         pass
 
+# Fester Backup-Ordner für tägliche Abholer_DB-Sicherungen (NAS, alle PCs)
+BACKUP_DIR               = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv")
+
 # Google Drive Konfiguration
 GDRIVE_FOLDER_ID         = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Tagesbote Upload
 TOURLISTEN_DIR           = Path(r"W:\Automatisierungen\16_EMMA\7_CAF\Buchen\Emma-3")
@@ -472,12 +475,13 @@ def write_excel_text_cols(df: pd.DataFrame, out_path: Path, text_cols: list[str]
     wb.save(out_path)
 
 
-def backup_abholer_db(export_folder: Path) -> Path:
-    """Lädt die komplette Abholer_DB und speichert sie als Excel-Backup."""
+def backup_abholer_db() -> Path:
+    """Lädt die komplette Abholer_DB und speichert sie als Excel-Backup
+    im festen Archiv-Ordner auf dem NAS (BACKUP_DIR). So gehen Backups
+    von allen Bombadil-PCs in den selben zentralen Ordner."""
     today = date.today().strftime("%Y-%m-%d")
-    backup_dir = export_folder / "Backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    out_path = backup_dir / f"Abholer_DB_Backup_{today}.xlsx"
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = BACKUP_DIR / f"Abholer_DB_Backup_{today}.xlsx"
     df = fetch_abholer_orca()
     write_excel_text_cols(df, out_path, text_cols=list(df.columns))
     return out_path
@@ -7745,7 +7749,7 @@ class App(tk.Tk):
     def _run_backup(self, manual=False):
         def worker():
             try:
-                path = backup_abholer_db(self.export_folder)
+                path = backup_abholer_db()
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 self.after(0, lambda p=path, d=today_str: self._on_backup_done(p, d, manual))
             except Exception as e:
