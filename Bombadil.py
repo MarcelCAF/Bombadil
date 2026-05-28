@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.41"
+VERSION = "1.0.42"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -678,6 +678,50 @@ def _merge_live_archiv(live_df, archiv_df):
         combined = combined[combined[bc_col].astype(str).str.len() > 0]
         combined = combined.drop_duplicates(subset=[bc_col], keep="last")
     return combined
+
+
+# Manuelle Korrektur für DHL Express pro Monat (gegen CSV-Vergleich).
+# Wird über alle Tage des Monats gleichmäßig verteilt und gilt für alle
+# Statistik-Ansichten (Tag/Woche/Monat + Kacheln).
+DHL_KORREKTUR_EXPRESS = {
+    "2026-05": 4122,   # Mai 2026: CSV-Summe (20.538) − NAS-Summe (16.416)
+}
+
+
+def apply_dhl_express_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Fügt Phantom-Pakete für Monate ein, die in den NAS-Archiven zu wenig
+    Daten haben (Vergleich gegen CSV 'CAF Priority List'). Die Phantom-
+    Pakete werden gleichmäßig über alle Tage des Monats verteilt."""
+    if df is None or not DHL_KORREKTUR_EXPRESS:
+        return df
+    import calendar
+    from datetime import datetime as _dt
+    rows = []
+    for ym_str, count in DHL_KORREKTUR_EXPRESS.items():
+        try:
+            year, month = (int(x) for x in ym_str.split("-"))
+        except Exception:
+            continue
+        if int(count) <= 0:
+            continue
+        days = calendar.monthrange(year, month)[1]
+        per_day, rest = divmod(int(count), days)
+        for d in range(1, days + 1):
+            n = per_day + (1 if d <= rest else 0)
+            if n <= 0:
+                continue
+            ts = _dt(year, month, d, 12, 0)
+            for i in range(n):
+                rows.append({
+                    "Package Barcode": f"KORR_{ym_str}_{d:02d}_{i:04d}",
+                    "Date of Scan":    ts,
+                })
+    if not rows:
+        return df
+    extra = pd.DataFrame(rows)
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return extra
+    return pd.concat([df, extra], ignore_index=True)
 
 
 def _read_excel_robust(xlsx) -> "pd.DataFrame":
@@ -3243,6 +3287,9 @@ class StatistikTab:
                     normal_live, _merge_live_archiv(normal_arch, normal_nas))
                 express_df = _merge_live_archiv(
                     express_live, _merge_live_archiv(express_arch, express_nas))
+
+                # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
+                express_df = apply_dhl_express_korrektur(express_df)
 
                 self.frame.after(0, lambda n=normal_df, e=express_df: self._dhl_on_loaded(n, e))
             except Exception as ex:
