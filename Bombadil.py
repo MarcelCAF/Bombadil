@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.39"
+VERSION = "1.0.40"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -312,6 +312,10 @@ def _save_tagesbote_cache(rows: list):
 # Fester Backup-Ordner für tägliche Abholer_DB-Sicherungen (NAS, alle PCs)
 BACKUP_DIR               = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv")
 
+# NAS-Archive für historische DHL-Daten (manuell gesicherte Excel-Dateien)
+DHL_NAS_NORMAL_DIR       = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Normal")
+DHL_NAS_EXPRESS_DIR      = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Express")
+
 # Google Drive Konfiguration
 GDRIVE_FOLDER_ID         = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Tagesbote Upload
 TOURLISTEN_DIR           = Path(r"W:\Automatisierungen\16_EMMA\7_CAF\Buchen\Emma-3")
@@ -485,6 +489,234 @@ def backup_abholer_db() -> Path:
     df = fetch_abholer_orca()
     write_excel_text_cols(df, out_path, text_cols=list(df.columns))
     return out_path
+
+
+def _fetch_single_archiv_gdrive(filename: str, folder_id: str) -> "pd.DataFrame | None":
+    """Lädt eine spezifische Archiv-Datei vom Drive. Gibt None zurück wenn nicht da."""
+    if not GDRIVE_AVAILABLE:
+        return None
+    try:
+        service = _get_oauth_drive_service()
+        res = service.files().list(
+            q=f"name = '{filename}' and '{folder_id}' in parents and trashed = false",
+            fields="files(id)",
+            pageSize=5,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            return None
+        import io as _io
+        request = service.files().get_media(fileId=files[0]["id"])
+        buf = _io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return pd.read_excel(buf)
+    except Exception:
+        return None
+
+
+def _delete_drive_files_by_name(filename: str, folder_id: str):
+    """Löscht alle Dateien mit dem angegebenen Namen im Drive-Ordner."""
+    if not GDRIVE_AVAILABLE:
+        return
+    try:
+        service = _get_oauth_drive_service()
+        res = service.files().list(
+            q=f"name = '{filename}' and '{folder_id}' in parents and trashed = false",
+            fields="files(id)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        for f in res.get("files", []):
+            try:
+                service.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def backup_dhl_to_gdrive() -> dict:
+    """Sichert DHL Normal + DHL Express in monatliche Excel-Dateien auf Drive.
+    Format: DHL_Normal_Archiv_YYYY-MM.xlsx / DHL_Express_Archiv_YYYY-MM.xlsx
+    Merged mit existierender Monats-Datei (per Barcode deduplizieren).
+
+    Schützt die DHL-Statistik vor OrcaScan-Löschungen (z.B. wenn Zeilen-
+    limit erreicht wird und Marcel alte Pakete entfernt).
+    """
+    yyyy_mm = date.today().strftime("%Y-%m")
+    results = {"normal": None, "express": None}
+    for sheet_id, prefix, key in [
+        (ORCA_DHL_NORMAL_SHEET_ID, "DHL_Normal_Archiv",  "normal"),
+        (ORCA_DHL_EX_SHEET_ID,     "DHL_Express_Archiv", "express"),
+    ]:
+        try:
+            live_df = fetch_sheet_orca(sheet_id, drop_cols={"signature", "packagePhoto"})
+        except Exception as e:
+            results[key] = f"Fehler beim Laden: {e}"
+            continue
+
+        if live_df is None or live_df.empty:
+            results[key] = "leer"
+            continue
+
+        filename = f"{prefix}_{yyyy_mm}.xlsx"
+
+        # Bestehendes Monatsarchiv holen
+        archiv_df = _fetch_single_archiv_gdrive(filename, GDRIVE_ABHOLER_FOLDER_ID)
+
+        # Mergen + per Barcode deduplizieren (Live gewinnt)
+        if archiv_df is not None and not archiv_df.empty:
+            combined = pd.concat([archiv_df, live_df], ignore_index=True)
+            bc_col = first_existing(combined, COL_BARCODE)
+            if bc_col:
+                combined = combined.drop_duplicates(subset=[bc_col], keep="last")
+        else:
+            combined = live_df
+
+        # Alte Datei löschen, dann frisch hochladen
+        try:
+            _delete_drive_files_by_name(filename, GDRIVE_ABHOLER_FOLDER_ID)
+            upload_excel_to_gdrive(combined, GDRIVE_ABHOLER_FOLDER_ID, filename)
+            results[key] = f"{len(combined)} Einträge"
+        except Exception as e:
+            results[key] = f"Upload-Fehler: {e}"
+    return results
+
+
+def fetch_dhl_archiv_gdrive() -> tuple:
+    """Lädt alle DHL_Normal_Archiv_* + DHL_Express_Archiv_* Dateien vom Drive.
+    Filter: letzte 12 Monate. Returns (normal_archiv_df, express_archiv_df).
+    """
+    empty = (pd.DataFrame(), pd.DataFrame())
+    if not GDRIVE_AVAILABLE:
+        return empty
+    try:
+        service = _get_oauth_drive_service()
+    except Exception:
+        return empty
+
+    import re as _re
+    from datetime import date as _date
+    cutoff = _date.today().replace(year=_date.today().year - 1)
+    cutoff_str = cutoff.strftime("%Y-%m")
+
+    def _load_for_prefix(prefix):
+        try:
+            res = service.files().list(
+                q=f"'{GDRIVE_ABHOLER_FOLDER_ID}' in parents "
+                  f"and name contains '{prefix}' "
+                  f"and trashed = false",
+                fields="files(id, name)",
+                orderBy="modifiedTime desc",
+                pageSize=100,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            files = res.get("files", [])
+        except Exception:
+            return pd.DataFrame()
+
+        filtered = []
+        for f in files:
+            m = _re.search(r'(\d{4}-\d{2})', f.get("name", ""))
+            if m and m.group(1) >= cutoff_str:
+                filtered.append(f)
+        if not filtered:
+            return pd.DataFrame()
+
+        import io as _io
+        frames = []
+        for f in filtered:
+            try:
+                req = service.files().get_media(fileId=f["id"])
+                buf = _io.BytesIO()
+                dl  = MediaIoBaseDownload(buf, req)
+                done = False
+                while not done:
+                    _, done = dl.next_chunk()
+                buf.seek(0)
+                df = pd.read_excel(buf)
+                if not df.empty:
+                    frames.append(df)
+            except Exception:
+                pass
+
+        if not frames:
+            return pd.DataFrame()
+        combined = pd.concat(frames, ignore_index=True)
+        bc = first_existing(combined, COL_BARCODE)
+        if bc:
+            combined = combined.drop_duplicates(subset=[bc], keep="last")
+        return combined
+
+    return _load_for_prefix("DHL_Normal_Archiv"), _load_for_prefix("DHL_Express_Archiv")
+
+
+def _merge_live_archiv(live_df, archiv_df):
+    """Merged Live + Archiv DataFrames, dedupliziert per Barcode (Live gewinnt).
+    Sucht die Barcode-Spalte case-insensitive über alle bekannten Varianten."""
+    live_empty = live_df is None or (hasattr(live_df, "empty") and live_df.empty)
+    arch_empty = archiv_df is None or (hasattr(archiv_df, "empty") and archiv_df.empty)
+    if arch_empty:
+        return live_df if not live_empty else pd.DataFrame()
+    if live_empty:
+        return archiv_df
+    combined = pd.concat([archiv_df, live_df], ignore_index=True)
+    # Versuche zuerst die OrcaScan-/DHL-Namen, dann die Abholer-Namen
+    bc_col = first_existing(combined, ORCA_COL_BARCODE) or \
+             first_existing(combined, COL_BARCODE)
+    if bc_col:
+        # Barcode normalisieren bevor wir deduplizieren (string-trim, .0 raus)
+        combined[bc_col] = combined[bc_col].apply(clean_barcode)
+        combined = combined[combined[bc_col].astype(str).str.len() > 0]
+        combined = combined.drop_duplicates(subset=[bc_col], keep="last")
+    return combined
+
+
+def load_dhl_nas_archive(folder: Path) -> "pd.DataFrame":
+    """Liest alle .xlsx aus einem NAS-Archiv-Ordner für DHL.
+    Normalisiert Spaltennamen (case-insensitive) und dedupliziert per Barcode.
+    Returns leeren DataFrame wenn Ordner nicht existiert oder leer ist."""
+    if folder is None or not folder.exists():
+        return pd.DataFrame()
+    frames = []
+    for xlsx in folder.glob("*.xlsx"):
+        try:
+            df = pd.read_excel(xlsx)
+            if df is None or df.empty:
+                continue
+            # Spalten case-insensitive normalisieren
+            renamed = {}
+            for col in df.columns:
+                c_low = str(col).strip().lower()
+                if c_low in ("package barcode", "paket-barcode", "paket barcode",
+                             "paketbarcode", "barcode"):
+                    renamed[col] = "Package Barcode"
+                elif c_low in ("date of scan", "scan date", "scandate",
+                               "datum", "date"):
+                    renamed[col] = "Date of Scan"
+            if renamed:
+                df = df.rename(columns=renamed)
+            if "Package Barcode" not in df.columns:
+                continue   # Datei ohne erkennbare Barcode-Spalte überspringen
+            df["Package Barcode"] = df["Package Barcode"].apply(clean_barcode)
+            df = df[df["Package Barcode"].astype(str).str.len() > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            pass  # fehlerhafte Datei überspringen
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["Package Barcode"], keep="last")
+    return combined
 
 
 # ============================================================
@@ -2965,9 +3197,30 @@ class StatistikTab:
 
         def _worker():
             try:
-                _drop      = {"signature", "packagePhoto"}
-                normal_df  = fetch_sheet_orca(ORCA_DHL_NORMAL_SHEET_ID, drop_cols=_drop)
-                express_df = fetch_sheet_orca(ORCA_DHL_EX_SHEET_ID,     drop_cols=_drop)
+                _drop       = {"signature", "packagePhoto"}
+                normal_live  = fetch_sheet_orca(ORCA_DHL_NORMAL_SHEET_ID, drop_cols=_drop)
+                express_live = fetch_sheet_orca(ORCA_DHL_EX_SHEET_ID,     drop_cols=_drop)
+
+                # Drive-Archiv (best-effort) für historische OrcaScan-Daten
+                try:
+                    normal_arch, express_arch = fetch_dhl_archiv_gdrive()
+                except Exception:
+                    normal_arch, express_arch = pd.DataFrame(), pd.DataFrame()
+
+                # NAS-Archiv (alte manuelle Excel-Sicherungen, best-effort)
+                try:
+                    normal_nas  = load_dhl_nas_archive(DHL_NAS_NORMAL_DIR)
+                    express_nas = load_dhl_nas_archive(DHL_NAS_EXPRESS_DIR)
+                except Exception:
+                    normal_nas, express_nas = pd.DataFrame(), pd.DataFrame()
+
+                # Alle drei Quellen mergen (Live + Drive-Archiv + NAS-Archiv),
+                # per Barcode dedupliziert (Live gewinnt).
+                normal_df  = _merge_live_archiv(
+                    normal_live, _merge_live_archiv(normal_arch, normal_nas))
+                express_df = _merge_live_archiv(
+                    express_live, _merge_live_archiv(express_arch, express_nas))
+
                 self.frame.after(0, lambda n=normal_df, e=express_df: self._dhl_on_loaded(n, e))
             except Exception as ex:
                 self.frame.after(0, lambda err=ex: self._dhl_on_error(err))
@@ -3549,9 +3802,20 @@ class StatistikTab:
                     .dt.tz_convert(None).dt.date.dropna())
 
         def _abholung_dates_from_main():
-            df = self._main_df
-            if df is None or df.empty:
+            # Live + Drive-Archiv mergen damit auch historische Abholungen
+            # (Dezember–März etc.) gezählt werden, nicht nur Live-OrcaScan.
+            frames = []
+            if self._main_df is not None and not self._main_df.empty:
+                frames.append(self._main_df)
+            if self._archiv_df is not None and not self._archiv_df.empty:
+                frames.append(self._archiv_df)
+            if not frames:
                 return pd.Series([], dtype="object")
+            df = pd.concat(frames, ignore_index=True)
+            # Per Barcode dedupizieren – Live gewinnt
+            c_bc = first_existing(df, COL_BARCODE)
+            if c_bc:
+                df = df.drop_duplicates(subset=[c_bc], keep="first")
             c_abgeholt    = first_existing(df, COL_ABGEHOLT)
             c_abholbereit = first_existing(df, COL_ABHOLBEREIT)
             c_status      = first_existing(df, COL_STATUS)
@@ -7750,6 +8014,12 @@ class App(tk.Tk):
         def worker():
             try:
                 path = backup_abholer_db()
+                # DHL-Backup zusätzlich (Drive-Archiv für DHL-Statistik).
+                # Fehler hier dürfen das Abholer-Backup nicht killen.
+                try:
+                    backup_dhl_to_gdrive()
+                except Exception as e:
+                    print(f"[DHL-Backup] Fehler: {e}")
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 self.after(0, lambda p=path, d=today_str: self._on_backup_done(p, d, manual))
             except Exception as e:
