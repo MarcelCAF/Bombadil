@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.40"
+VERSION = "1.0.41"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -680,6 +680,29 @@ def _merge_live_archiv(live_df, archiv_df):
     return combined
 
 
+def _read_excel_robust(xlsx) -> "pd.DataFrame":
+    """Liest eine .xlsx-Datei mit Fallback-Engine. Manche Dateien (z.B. aus
+    Cloud-Exporten) lassen sich nicht mit openpyxl lesen, calamine kommt
+    damit klar. Calamine wird bei Bedarf nachinstalliert."""
+    try:
+        return pd.read_excel(xlsx)
+    except Exception:
+        # openpyxl scheitert → calamine versuchen (kann manche Cloud-xlsx)
+        try:
+            return pd.read_excel(xlsx, engine="calamine")
+        except ImportError:
+            # python-calamine nicht installiert → nachinstallieren
+            try:
+                import subprocess as _sp, sys as _sys
+                _sp.run([_sys.executable, "-m", "pip", "install",
+                         "python-calamine", "-q"], check=False, timeout=60)
+                return pd.read_excel(xlsx, engine="calamine")
+            except Exception:
+                return pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+
 def load_dhl_nas_archive(folder: Path) -> "pd.DataFrame":
     """Liest alle .xlsx aus einem NAS-Archiv-Ordner für DHL.
     Normalisiert Spaltennamen (case-insensitive) und dedupliziert per Barcode.
@@ -689,7 +712,7 @@ def load_dhl_nas_archive(folder: Path) -> "pd.DataFrame":
     frames = []
     for xlsx in folder.glob("*.xlsx"):
         try:
-            df = pd.read_excel(xlsx)
+            df = _read_excel_robust(xlsx)
             if df is None or df.empty:
                 continue
             # Spalten case-insensitive normalisieren
