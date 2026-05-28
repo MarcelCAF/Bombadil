@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.42"
+VERSION = "1.0.43"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -687,6 +687,13 @@ DHL_KORREKTUR_EXPRESS = {
     "2026-05": 4122,   # Mai 2026: CSV-Summe (20.538) − NAS-Summe (16.416)
 }
 
+# Manuelle Korrektur für PU-Statistik (Lieferungen, Verpackt_At) pro Monat.
+# Vergleich gegen Tagesbote-Excel-Listen aus Google Drive (eindeutige
+# Pakete im Tagesbote als "Verpackt" gelistet).
+PU_KORREKTUR_VERPACKT = {
+    "2026-04": 1111,   # April 2026: Drive-Tagesbote (2.091) − Bombadil-Verpackt (980)
+}
+
 
 def apply_dhl_express_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
     """Fügt Phantom-Pakete für Monate ein, die in den NAS-Archiven zu wenig
@@ -715,6 +722,45 @@ def apply_dhl_express_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
                 rows.append({
                     "Package Barcode": f"KORR_{ym_str}_{d:02d}_{i:04d}",
                     "Date of Scan":    ts,
+                })
+    if not rows:
+        return df
+    extra = pd.DataFrame(rows)
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return extra
+    return pd.concat([df, extra], ignore_index=True)
+
+
+def apply_pu_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Fügt Phantom-PU-Pakete für Monate ein, in denen die Bombadil-Statistik
+    weniger Pakete zählt als die Tagesbote-Excel-Listen aus dem Drive zeigen.
+
+    Pro Phantom-Paket wird `Verpackt_At` gesetzt (für Lieferungs-Statistik),
+    Barcode ist eindeutig (KORR_PU_…). Verteilung gleichmäßig über alle Tage
+    des Monats."""
+    if df is None or not PU_KORREKTUR_VERPACKT:
+        return df
+    import calendar
+    from datetime import datetime as _dt
+    rows = []
+    for ym_str, count in PU_KORREKTUR_VERPACKT.items():
+        try:
+            year, month = (int(x) for x in ym_str.split("-"))
+        except Exception:
+            continue
+        if int(count) <= 0:
+            continue
+        days = calendar.monthrange(year, month)[1]
+        per_day, rest = divmod(int(count), days)
+        for d in range(1, days + 1):
+            n = per_day + (1 if d <= rest else 0)
+            if n <= 0:
+                continue
+            ts = _dt(year, month, d, 12, 0)
+            for i in range(n):
+                rows.append({
+                    "Paket-Barcode": f"KORR_PU_{ym_str}_{d:02d}_{i:04d}",
+                    "Verpackt_At":   ts,
                 })
     if not rows:
         return df
@@ -3364,6 +3410,11 @@ class StatistikTab:
             return
 
         combined = pd.concat(frames, ignore_index=True)
+
+        # Manuelle Monats-Korrektur (Phantom-Pakete für PU, gegen Tagesbote-
+        # Drive-Vergleich). Wirkt auf Lieferungen (Verpackt_At) in allen
+        # Ansichten Tag/Woche/Monat + Kacheln.
+        combined = apply_pu_korrektur(combined)
 
         # Duplikate (gleicher Barcode) entfernen – aktuell gewinnt über Archiv
         c_bc = first_existing(combined, COL_BARCODE)
