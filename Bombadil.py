@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.43"
+VERSION = "1.0.44"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -316,10 +316,16 @@ BACKUP_DIR               = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\A
 DHL_NAS_NORMAL_DIR       = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Normal")
 DHL_NAS_EXPRESS_DIR      = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Express")
 
-# Google Drive Konfiguration
-GDRIVE_FOLDER_ID         = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Tagesbote Upload
+# Google Drive Konfiguration – 5 getrennte Unter-Ordner
+GDRIVE_FOLDER_ABHOLER    = "1OSnMmPf--uqt4ulDGy3ILT61pUuCPzpn"   # Ordner: Abholer_DB
+GDRIVE_FOLDER_DHL_NORMAL = "1G5_i9zUvjqVBCnE_ME-fPkhK4j5SPWpe"   # Ordner: DHL (Normal)
+GDRIVE_FOLDER_DHL_EXPRESS= "1J_oZcBmPECYfL7xj5U0oxgao--sdzS_c"   # Ordner: EXPRESS
+GDRIVE_FOLDER_TAGESBOTE  = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Ordner: Tagesbote Upload
+GDRIVE_FOLDER_TOUR_ZEITEN= "1ALz0IR6JeoUVXFMAMxida4MT7lQ0ArDd"    # Ordner: Tourlisten
+# Rückwärts-Kompatibilität (alte Namen als Aliase – damit nichts bricht)
+GDRIVE_ABHOLER_FOLDER_ID = GDRIVE_FOLDER_ABHOLER
+GDRIVE_FOLDER_ID         = GDRIVE_FOLDER_TAGESBOTE
 TOURLISTEN_DIR           = Path(r"W:\Automatisierungen\16_EMMA\7_CAF\Buchen\Emma-3")
-GDRIVE_ABHOLER_FOLDER_ID = "1OSnMmPf--uqt4ulDGy3ILT61pUuCPzpn"   # Abholer_DB Archiv
 TAGESBOTE_SEARCH_NAME = "tagesbote"
 SERVICE_ACCOUNT_FILE  = BASE_DIR / "service_account.json"
 OAUTH_CREDENTIALS_FILE = BASE_DIR / "oauth_credentials.json"
@@ -543,18 +549,17 @@ def _delete_drive_files_by_name(filename: str, folder_id: str):
 
 
 def backup_dhl_to_gdrive() -> dict:
-    """Sichert DHL Normal + DHL Express in monatliche Excel-Dateien auf Drive.
-    Format: DHL_Normal_Archiv_YYYY-MM.xlsx / DHL_Express_Archiv_YYYY-MM.xlsx
-    Merged mit existierender Monats-Datei (per Barcode deduplizieren).
+    """Sichert DHL Normal + DHL Express als TÄGLICHEN Snapshot auf Google Drive.
+    Format: DHL_Normal_Backup_YYYY-MM-DD.xlsx / DHL_Express_Backup_YYYY-MM-DD.xlsx
 
-    Schützt die DHL-Statistik vor OrcaScan-Löschungen (z.B. wenn Zeilen-
-    limit erreicht wird und Marcel alte Pakete entfernt).
+    Schützt die DHL-Statistik vor OrcaScan-Löschungen. Wenn Bombadil mehrmals
+    am Tag läuft, wird die heutige Datei überschrieben (gleicher Name).
     """
-    yyyy_mm = date.today().strftime("%Y-%m")
+    today_str = date.today().strftime("%Y-%m-%d")
     results = {"normal": None, "express": None}
-    for sheet_id, prefix, key in [
-        (ORCA_DHL_NORMAL_SHEET_ID, "DHL_Normal_Archiv",  "normal"),
-        (ORCA_DHL_EX_SHEET_ID,     "DHL_Express_Archiv", "express"),
+    for sheet_id, prefix, key, folder_id in [
+        (ORCA_DHL_NORMAL_SHEET_ID, "DHL_Normal_Backup",  "normal",  GDRIVE_FOLDER_DHL_NORMAL),
+        (ORCA_DHL_EX_SHEET_ID,     "DHL_Express_Backup", "express", GDRIVE_FOLDER_DHL_EXPRESS),
     ]:
         try:
             live_df = fetch_sheet_orca(sheet_id, drop_cols={"signature", "packagePhoto"})
@@ -566,33 +571,21 @@ def backup_dhl_to_gdrive() -> dict:
             results[key] = "leer"
             continue
 
-        filename = f"{prefix}_{yyyy_mm}.xlsx"
-
-        # Bestehendes Monatsarchiv holen
-        archiv_df = _fetch_single_archiv_gdrive(filename, GDRIVE_ABHOLER_FOLDER_ID)
-
-        # Mergen + per Barcode deduplizieren (Live gewinnt)
-        if archiv_df is not None and not archiv_df.empty:
-            combined = pd.concat([archiv_df, live_df], ignore_index=True)
-            bc_col = first_existing(combined, COL_BARCODE)
-            if bc_col:
-                combined = combined.drop_duplicates(subset=[bc_col], keep="last")
-        else:
-            combined = live_df
-
-        # Alte Datei löschen, dann frisch hochladen
+        filename = f"{prefix}_{today_str}.xlsx"
         try:
-            _delete_drive_files_by_name(filename, GDRIVE_ABHOLER_FOLDER_ID)
-            upload_excel_to_gdrive(combined, GDRIVE_ABHOLER_FOLDER_ID, filename)
-            results[key] = f"{len(combined)} Einträge"
+            _delete_drive_files_by_name(filename, folder_id)
+            upload_excel_to_gdrive(live_df, folder_id, filename)
+            results[key] = f"{len(live_df)} Einträge"
         except Exception as e:
             results[key] = f"Upload-Fehler: {e}"
     return results
 
 
 def fetch_dhl_archiv_gdrive() -> tuple:
-    """Lädt alle DHL_Normal_Archiv_* + DHL_Express_Archiv_* Dateien vom Drive.
-    Filter: letzte 12 Monate. Returns (normal_archiv_df, express_archiv_df).
+    """Lädt alle DHL-Backup-Dateien vom Drive (sowohl alte monatliche
+    DHL_*_Archiv_YYYY-MM.xlsx als auch neue tägliche
+    DHL_*_Backup_YYYY-MM-DD.xlsx). Filter: letzte 12 Monate.
+    Returns (normal_archiv_df, express_archiv_df).
     """
     empty = (pd.DataFrame(), pd.DataFrame())
     if not GDRIVE_AVAILABLE:
@@ -607,10 +600,10 @@ def fetch_dhl_archiv_gdrive() -> tuple:
     cutoff = _date.today().replace(year=_date.today().year - 1)
     cutoff_str = cutoff.strftime("%Y-%m")
 
-    def _load_for_prefix(prefix):
+    def _load_for_prefix(prefix, folder_id):
         try:
             res = service.files().list(
-                q=f"'{GDRIVE_ABHOLER_FOLDER_ID}' in parents "
+                q=f"'{folder_id}' in parents "
                   f"and name contains '{prefix}' "
                   f"and trashed = false",
                 fields="files(id, name)",
@@ -656,7 +649,21 @@ def fetch_dhl_archiv_gdrive() -> tuple:
             combined = combined.drop_duplicates(subset=[bc], keep="last")
         return combined
 
-    return _load_for_prefix("DHL_Normal_Archiv"), _load_for_prefix("DHL_Express_Archiv")
+    def _merge_two(a, b):
+        if a is None or a.empty: return b
+        if b is None or b.empty: return a
+        comb = pd.concat([a, b], ignore_index=True)
+        bc = first_existing(comb, COL_BARCODE)
+        if bc:
+            comb = comb.drop_duplicates(subset=[bc], keep="last")
+        return comb
+
+    # Normal-Archiv aus DHL-Normal-Ordner, Express-Archiv aus EXPRESS-Ordner
+    normal  = _merge_two(_load_for_prefix("DHL_Normal_Archiv", GDRIVE_FOLDER_DHL_NORMAL),
+                         _load_for_prefix("DHL_Normal_Backup",  GDRIVE_FOLDER_DHL_NORMAL))
+    express = _merge_two(_load_for_prefix("DHL_Express_Archiv", GDRIVE_FOLDER_DHL_EXPRESS),
+                         _load_for_prefix("DHL_Express_Backup",  GDRIVE_FOLDER_DHL_EXPRESS))
+    return normal, express
 
 
 def _merge_live_archiv(live_df, archiv_df):
@@ -5193,22 +5200,28 @@ class PickupHeuteTab:
         disp = self._displayed_rows
         if row_idx >= len(disp):
             return
-        r = disp[row_idx]
+        r = disp[row_idx]   # angeklickte Zeile (für State-Checks der Menü-Items)
+
+        # Liste aller zu manipulierenden Zeilen (Multi-Select-Support)
+        action_rows = self._get_action_rows(row_idx)
+        n_sel = len(action_rows)
+        suffix = f" ({n_sel})" if n_sel > 1 else ""
 
         menu = tk.Menu(self.frame, tearoff=0)
 
         # ── Packstatus (Tagesboten-Sheet) ──────────────────────────────
         if r.get("_tb_row_id"):
             already_vp = r["tb_status"].lower() == "verpackt"
+            tb_rows = [x for x in action_rows if x.get("_tb_row_id")]
             menu.add_command(
-                label="✓  Verpackt setzen",
-                state="disabled" if already_vp else "normal",
-                command=lambda: self._set_kontrollstatus(r, "Verpackt")
+                label=f"✓  Verpackt setzen{suffix}",
+                state="disabled" if already_vp and n_sel == 1 else "normal",
+                command=lambda: self._set_kontrollstatus(tb_rows, "Verpackt")
             )
             menu.add_command(
-                label="○  Offen setzen",
-                state="disabled" if not already_vp else "normal",
-                command=lambda: self._set_kontrollstatus(r, "Offen")
+                label=f"○  Offen setzen{suffix}",
+                state="disabled" if not already_vp and n_sel == 1 else "normal",
+                command=lambda: self._set_kontrollstatus(tb_rows, "Offen")
             )
 
         # ── Abholbereit + Status + Löschen (Abholer_DB) ────────────────
@@ -5216,37 +5229,42 @@ class PickupHeuteTab:
             if r.get("_tb_row_id"):
                 menu.add_separator()
             already_ab = r["_abholbereit_bool"]
+            db_rows = [x for x in action_rows if x.get("_db_id")]
             menu.add_command(
-                label="📦  Abholbereit setzen",
-                state="disabled" if already_ab else "normal",
-                command=lambda: self._set_abholbereit_single(r)
+                label=f"📦  Abholbereit setzen{suffix}",
+                state="disabled" if already_ab and n_sel == 1 else "normal",
+                command=lambda: self._set_abholbereit_single(db_rows)
             )
             menu.add_separator()
             menu.add_command(
-                label="↩  Retoure",
-                command=lambda: self._set_db_status(r, "Retoure")
+                label=f"↩  Retoure{suffix}",
+                command=lambda: self._set_db_status(db_rows, "Retoure")
             )
             menu.add_command(
-                label="✗  Storno",
-                command=lambda: self._set_db_status(r, "Storno")
+                label=f"✗  Storno{suffix}",
+                command=lambda: self._set_db_status(db_rows, "Storno")
             )
             menu.add_command(
-                label="✓  Abgeholt",
-                command=lambda: self._set_db_status(r, "Abgeholt")
+                label=f"✓  Abgeholt{suffix}",
+                command=lambda: self._set_db_status(db_rows, "Abgeholt")
             )
             menu.add_separator()
             menu.add_command(
-                label="🗑️  Aus Abholer_DB löschen",
-                command=lambda: self._delete_from_db(r)
+                label=f"🗑️  Aus Abholer_DB löschen{suffix}",
+                command=lambda: self._delete_from_db(action_rows)
             )
 
         # ── In Abholer_DB übertragen (nur wenn nicht in DB) ────────────
         if r.get("_tb_row_id") and not r.get("_db_id"):
             if menu.index("end") is not None:
                 menu.add_separator()
+            transfer_rows = [x for x in action_rows
+                             if x.get("_tb_row_id") and not x.get("_db_id")]
+            n_transfer = len(transfer_rows)
+            tsfx = f" ({n_transfer})" if n_transfer > 1 else ""
             menu.add_command(
-                label="📥  In Abholer_DB übertragen",
-                command=lambda: self._transfer_to_abholer_db(r)
+                label=f"📥  In Abholer_DB übertragen{tsfx}",
+                command=lambda: self._transfer_to_abholer_db(transfer_rows)
             )
 
         if menu.index("end") is None:
@@ -5257,132 +5275,207 @@ class PickupHeuteTab:
         finally:
             menu.grab_release()
 
-    def _set_kontrollstatus(self, r, new_status):
-        """Setzt den Kontrollstatus einer Zeile in OrcaScan und aktualisiert die Anzeige."""
+    def _get_action_rows(self, clicked_row_idx):
+        """Liefert die Liste der zu verarbeitenden Zeilen für eine Rechtsklick-Aktion.
+        - Wenn mehrere Zeilen markiert sind UND die geklickte ist Teil der Selektion:
+          alle markierten Zeilen
+        - Sonst: nur die geklickte Zeile (Selektion wird auf diese Zeile gesetzt)
+        """
+        disp = self._displayed_rows or []
+        if not disp:
+            return []
+        try:
+            selected = sorted(set(self._sheet.get_selected_rows()))
+        except Exception:
+            selected = []
+        if selected and clicked_row_idx in selected and len(selected) > 1:
+            return [disp[i] for i in selected if 0 <= i < len(disp)]
+        if 0 <= clicked_row_idx < len(disp):
+            return [disp[clicked_row_idx]]
+        return []
+
+    def _confirm_bulk(self, n, action_text):
+        """Bestätigungsdialog bei mehr als 3 Zeilen. Returns True wenn fortgefahren werden soll."""
+        if n <= 3:
+            return True
+        from tkinter import messagebox
+        return messagebox.askyesno(
+            "Sicherheitsfrage",
+            f"Du möchtest {n} Pakete {action_text}.\n\nBist du sicher?")
+
+    def _set_kontrollstatus(self, rows, new_status):
+        """Setzt den Kontrollstatus für eine oder mehrere Zeilen im Tagesboten."""
         import threading as _thr
         import json as _json
         import urllib.request as _urllib
         import urllib.error   as _urllib_err
+        if not isinstance(rows, list):
+            rows = [rows]
+        rows = [r for r in rows if r.get("_tb_row_id")]
+        if not rows:
+            return
+        n = len(rows)
+        if not self._confirm_bulk(n, f"auf Kontrollstatus '{new_status}' setzen"):
+            return
         self.status_lbl.config(
-            text=f"⏳  Setze Packstatus auf '{new_status}' …", fg="#e67e22")
+            text=f"⏳  Setze Packstatus auf '{new_status}' für {n} Paket(e) …", fg="#e67e22")
 
         def _worker():
-            # Tagesboten-Sheet nutzt interne Kleinschreibung:
-            #   "name" statt "receipiantName", "kontrollstatus" statt "Kontrollstatus"
-            payload = {
-                "barcode":         r["barcode"],
-                "name":            r["name"],
-                "kontrollstatus":  new_status,
-            }
-            body = _json.dumps(payload).encode("utf-8")
-            url  = (f"{ORCA_BASE_URL}/sheets/{ORCA_TAGESBOTE_SHEET_ID}"
-                    f"/rows/{r['_tb_row_id']}?partial=true")
-            req  = _urllib.Request(url, data=body, method="PUT",
-                                   headers={"Authorization": f"Bearer {ORCA_API_KEY}",
-                                            "Content-Type": "application/json"})
-            err = None
-            try:
-                with _urllib.urlopen(req, timeout=15) as resp:
-                    resp.read()
-            except _urllib_err.HTTPError as e:
-                err = f"HTTP {e.code}"
+            errors = []
+            for r in rows:
+                # Name nur senden wenn nicht leer (sonst wird Name in OrcaScan überschrieben)
+                payload = {"kontrollstatus": new_status}
+                if r.get("name"):
+                    payload["name"] = r["name"]
+                if r.get("barcode"):
+                    payload["barcode"] = r["barcode"]
+                body = _json.dumps(payload).encode("utf-8")
+                url  = (f"{ORCA_BASE_URL}/sheets/{ORCA_TAGESBOTE_SHEET_ID}"
+                        f"/rows/{r['_tb_row_id']}?partial=true")
+                req  = _urllib.Request(url, data=body, method="PUT",
+                                       headers={"Authorization": f"Bearer {ORCA_API_KEY}",
+                                                "Content-Type": "application/json"})
                 try:
-                    err += ": " + e.read().decode("utf-8", errors="replace")[:200]
-                except Exception:
-                    pass
-            except Exception as ex:
-                err = str(ex)
-            self.frame.after(0, lambda: _done(err))
+                    with _urllib.urlopen(req, timeout=15) as resp:
+                        resp.read()
+                except _urllib_err.HTTPError as e:
+                    msg = f"HTTP {e.code}"
+                    try: msg += ": " + e.read().decode("utf-8", errors="replace")[:80]
+                    except: pass
+                    errors.append((r["barcode"], msg))
+                except Exception as ex:
+                    errors.append((r["barcode"], str(ex)))
+            self.frame.after(0, lambda: _done(errors))
 
-        def _done(err):
-            if err:
+        def _done(errors):
+            ok = n - len(errors)
+            # Lokal aktualisieren für die erfolgreichen
+            failed_bcs = {bc for bc, _ in errors}
+            for r in rows:
+                if r["barcode"] not in failed_bcs:
+                    r["tb_status"] = new_status
+            self._refresh_ui()
+            if errors:
                 self.status_lbl.config(
-                    text=f"❌  Fehler beim Setzen: {err[:80]}", fg="#c0392b")
+                    text=f"⚠  {ok}/{n} erfolgreich, {len(errors)} Fehler", fg="#e67e22")
             else:
-                r["tb_status"] = new_status   # lokal sofort aktualisieren
-                self._refresh_ui()
                 self.status_lbl.config(
-                    text=f"✓  Packstatus '{new_status}' gesetzt – {r['barcode']}", fg="#27ae60")
+                    text=f"✓  Packstatus '{new_status}' für {n} Paket(e) gesetzt", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
-    def _set_abholbereit_single(self, r):
-        """Einzelne Zeile per Rechtsklick auf Abholbereit setzen."""
+    def _set_abholbereit_single(self, rows):
+        """Eine oder mehrere Zeilen auf Abholbereit setzen (mit Timestamp).
+        Name 'single' aus Legacy-Gründen – akzeptiert jetzt Liste."""
         import threading as _thr
         from datetime import datetime, timezone as _tz
-
+        if not isinstance(rows, list):
+            rows = [rows]
+        rows = [r for r in rows if r.get("_db_id")]
+        if not rows:
+            return
+        n = len(rows)
+        if not self._confirm_bulk(n, "auf 'Abholbereit' setzen"):
+            return
         self.status_lbl.config(
-            text=f"⏳  Setze '{r['barcode']}' auf Abholbereit …", fg="#e67e22")
+            text=f"⏳  Setze {n} Paket(e) auf Abholbereit …", fg="#e67e22")
 
         def _worker():
-            ts     = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            result = update_rows_orca_bulk(
-                [(r["_db_id"], r["barcode"], r["name"])],
-                {"location": "Abholbereit", "abholbereitu005fat": ts}
-            )
+            ts      = datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            updates = [(r["_db_id"], r["barcode"], r.get("name") or "") for r in rows]
+            result  = update_rows_orca_bulk(
+                updates,
+                {"location": "Abholbereit", "abholbereitu005fat": ts})
             self.frame.after(0, lambda: _done(result, ts))
 
         def _done(result, ts):
-            if result["failed"]:
+            failed = result.get("failed", [])
+            ok     = len(result.get("ok", []))
+            # Lokal aktualisieren
+            ok_bcs = {r["barcode"] for r in rows}  # alle Barcodes
+            failed_ids = set()
+            for f in failed:
+                # Format "row_id: error"
+                rid = f.split(":")[0].strip() if isinstance(f, str) else ""
+                failed_ids.add(rid)
+            for row in self._all_rows:
+                if (row["barcode"] in ok_bcs and
+                    row.get("_db_id") not in failed_ids):
+                    row["_abholbereit_bool"] = True
+                    row["abholbereit_at"]    = ts[:10]
+                    row["db_status"]         = "abholbereit"
+            self._refresh_ui()
+            if failed:
                 self.status_lbl.config(
-                    text=f"❌  Fehler: {result['failed'][0][:60]}", fg="#c0392b")
+                    text=f"⚠  {ok}/{n} erfolgreich, {len(failed)} Fehler", fg="#e67e22")
             else:
-                # Lokal sofort aktualisieren
-                for row in self._all_rows:
-                    if row["barcode"] == r["barcode"]:
-                        row["_abholbereit_bool"] = True
-                        row["abholbereit_at"]    = ts[:10]
-                        row["db_status"]         = "abholbereit"
-                self._refresh_ui()
                 self.status_lbl.config(
-                    text=f"✓  '{r['barcode']}' auf Abholbereit gesetzt", fg="#27ae60")
+                    text=f"✓  {n} Paket(e) auf Abholbereit gesetzt", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
-    def _set_db_status(self, r, new_status: str):
-        """Setzt location (Paketstatus) für eine einzelne Zeile in Abholer_DB."""
-        if not r.get("_db_id"):
-            return
+    def _set_db_status(self, rows, new_status: str):
+        """Setzt location für eine oder mehrere Zeilen in Abholer_DB."""
         import threading as _thr
+        if not isinstance(rows, list):
+            rows = [rows]
+        rows = [r for r in rows if r.get("_db_id")]
+        if not rows:
+            return
+        n = len(rows)
+        if not self._confirm_bulk(n, f"auf '{new_status}' setzen"):
+            return
         self.status_lbl.config(
-            text=f"⏳  Setze '{r['barcode']}' → {new_status} …", fg="#e67e22")
+            text=f"⏳  Setze {n} Paket(e) → {new_status} …", fg="#e67e22")
 
         def _worker():
-            result = update_rows_orca_bulk(
-                [(r["_db_id"], r["barcode"], r.get("name") or "")],
-                {"location": new_status},
+            updates = [(r["_db_id"], r["barcode"], r.get("name") or "") for r in rows]
+            result  = update_rows_orca_bulk(
+                updates, {"location": new_status},
                 sheet_id=ORCA_ABHOLER_SHEET_ID)
             self.frame.after(0, lambda: _done(result))
 
         def _done(result):
-            if result.get("failed"):
-                err = result["failed"][0] if result["failed"] else ""
-                self.status_lbl.config(
-                    text=f"❌  {new_status} fehlgeschlagen: {err[:60]}",
-                    fg="#c0392b")
-                return
-            # Lokale Aktualisierung
+            failed = result.get("failed", [])
+            ok     = len(result.get("ok", []))
+            # Lokal aktualisieren
+            failed_ids = set()
+            for f in failed:
+                rid = f.split(":")[0].strip() if isinstance(f, str) else ""
+                failed_ids.add(rid)
+            ok_db_ids = {r["_db_id"] for r in rows if r.get("_db_id") not in failed_ids}
             for row in self._all_rows:
-                if row.get("_db_id") == r["_db_id"]:
+                if row.get("_db_id") in ok_db_ids:
                     row["db_status"] = new_status.lower()
-                    break
             self._refresh_ui()
-            self.status_lbl.config(
-                text=f"✓  '{r['barcode']}' → {new_status}", fg="#27ae60")
+            if failed:
+                self.status_lbl.config(
+                    text=f"⚠  {ok}/{n} → {new_status}, {len(failed)} Fehler",
+                    fg="#e67e22")
+            else:
+                self.status_lbl.config(
+                    text=f"✓  {n} Paket(e) → {new_status}", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
-    def _transfer_to_abholer_db(self, r):
-        """Erzeugt eine neue Zeile in Abholer_DB aus den Tagesboten-Daten."""
+    def _transfer_to_abholer_db(self, rows):
+        """Erzeugt neue Zeilen in Abholer_DB aus Tagesboten-Daten (eine oder mehrere)."""
         from tkinter import messagebox
-        if r.get("_db_id"):
+        if not isinstance(rows, list):
+            rows = [rows]
+        new_rows = [r for r in rows if not r.get("_db_id")]
+        skipped  = len(rows) - len(new_rows)
+        if not new_rows:
             messagebox.showinfo(
                 "Bereits vorhanden",
-                f"Paket '{r['barcode']}' ist bereits in Abholer_DB.")
+                "Alle markierten Pakete sind bereits in Abholer_DB.")
+            return
+        n = len(new_rows)
+        if not self._confirm_bulk(n, "in Abholer_DB übertragen"):
             return
         import threading as _thr, datetime as _dt
         self.status_lbl.config(
-            text=f"⏳  Übertrage '{r['barcode']}' in Abholer_DB …", fg="#e67e22")
+            text=f"⏳  Übertrage {n} Paket(e) in Abholer_DB …", fg="#e67e22")
 
         def _worker():
             row_data = [{
@@ -5391,62 +5484,75 @@ class PickupHeuteTab:
                 "zielu002dkiosk":   r.get("zielkiosk") or "",
                 "location":         "Verpackt",
                 "datum":            _dt.datetime.now().strftime("%Y-%m-%d"),
-            }]
+            } for r in new_rows]
             result = create_rows_orca_bulk(row_data, sheet_id=ORCA_ABHOLER_SHEET_ID)
             self.frame.after(0, lambda: _done(result))
 
         def _done(result):
-            if result.get("failed"):
-                err = result["failed"][0] if result["failed"] else ""
+            failed = result.get("failed", []) or []
+            ok     = n - len(failed)
+            extra  = f" ({skipped} bereits in DB übersprungen)" if skipped else ""
+            if failed and ok == 0:
+                err = failed[0] if failed else ""
                 self.status_lbl.config(
-                    text=f"❌  Übertragung fehlgeschlagen: {err[:60]}",
+                    text=f"❌  Übertragung fehlgeschlagen: {str(err)[:60]}",
                     fg="#c0392b")
                 return
             self.status_lbl.config(
-                text=f"✓  '{r['barcode']}' nach Abholer_DB übertragen – lade neu …",
+                text=f"✓  {ok}/{n} Paket(e) nach Abholer_DB übertragen{extra} – lade neu …",
                 fg="#27ae60")
-            # Frischer Reload mit Abholer_DB direkt aus OrcaScan, damit die
-            # neue _db_id bekannt wird (Cache enthält die noch nicht).
             self._force_reload_abholer = True
             self._run()
 
         _thr.Thread(target=_worker, daemon=True).start()
 
-    def _delete_from_db(self, r):
-        """Zeile per Rechtsklick aus Abholer_DB und ggf. Tagesboten-Sheet löschen."""
+    def _delete_from_db(self, rows):
+        """Eine oder mehrere Zeilen aus Abholer_DB und/oder Tagesboten löschen."""
         import threading as _thr
         from tkinter import messagebox
-
-        has_db = bool(r.get("_db_id"))
-        has_tb = bool(r.get("_tb_row_id"))
-
-        sheets = []
-        if has_db:
-            sheets.append("Abholer_DB")
-        if has_tb:
-            sheets.append("Tagesboten-Sheet")
-        sheets_txt = " und ".join(sheets)
-
-        if not messagebox.askyesno(
-            "Löschen bestätigen",
-            f"Paket '{r['barcode']}' ({r['name']}) wirklich aus {sheets_txt} löschen?\n\n"
-            "Diese Aktion kann nicht rückgängig gemacht werden."
-        ):
+        if not isinstance(rows, list):
+            rows = [rows]
+        rows = [r for r in rows if r.get("_db_id") or r.get("_tb_row_id")]
+        if not rows:
             return
+        n = len(rows)
+        if n == 1:
+            r = rows[0]
+            sheets = []
+            if r.get("_db_id"):     sheets.append("Abholer_DB")
+            if r.get("_tb_row_id"): sheets.append("Tagesboten-Sheet")
+            sheets_txt = " und ".join(sheets)
+            if not messagebox.askyesno(
+                "Löschen bestätigen",
+                f"Paket '{r['barcode']}' ({r.get('name','')}) wirklich aus {sheets_txt} löschen?\n\n"
+                "Diese Aktion kann nicht rückgängig gemacht werden."
+            ):
+                return
+        else:
+            if not messagebox.askyesno(
+                "Löschen bestätigen",
+                f"{n} Pakete wirklich aus Abholer_DB UND Tagesboten-Sheet löschen?\n\n"
+                "Diese Aktion kann nicht rückgängig gemacht werden."
+            ):
+                return
 
         self.status_lbl.config(
-            text=f"⏳  Lösche '{r['barcode']}' …", fg="#e67e22")
+            text=f"⏳  Lösche {n} Paket(e) …", fg="#e67e22")
 
         def _worker():
             errors = []
-            if has_db:
-                res = delete_rows_orca_bulk([r["_db_id"]], sheet_id=ORCA_ABHOLER_SHEET_ID)
-                if res["failed"]:
-                    errors.append(f"Abholer_DB: {res['errors'][0][:50] if res['errors'] else 'Fehler'}")
-            if has_tb:
-                res = delete_rows_orca_bulk([r["_tb_row_id"]], sheet_id=ORCA_TAGESBOTE_SHEET_ID)
-                if res["failed"]:
-                    errors.append(f"Tagesbote: {res['errors'][0][:50] if res['errors'] else 'Fehler'}")
+            db_ids = [r["_db_id"]     for r in rows if r.get("_db_id")]
+            tb_ids = [r["_tb_row_id"] for r in rows if r.get("_tb_row_id")]
+            if db_ids:
+                res = delete_rows_orca_bulk(db_ids, sheet_id=ORCA_ABHOLER_SHEET_ID)
+                if res.get("failed"):
+                    err = res.get("errors", [""])[0] if res.get("errors") else "Fehler"
+                    errors.append(f"Abholer_DB: {len(res['failed'])} Fehler – {str(err)[:50]}")
+            if tb_ids:
+                res = delete_rows_orca_bulk(tb_ids, sheet_id=ORCA_TAGESBOTE_SHEET_ID)
+                if res.get("failed"):
+                    err = res.get("errors", [""])[0] if res.get("errors") else "Fehler"
+                    errors.append(f"Tagesbote: {len(res['failed'])} Fehler – {str(err)[:50]}")
             self.frame.after(0, lambda: _done(errors))
 
         def _done(errors):
@@ -5454,12 +5560,14 @@ class PickupHeuteTab:
                 self.status_lbl.config(
                     text=f"❌  Fehler: {' | '.join(errors)}", fg="#c0392b")
             else:
+                del_db_ids   = {r.get("_db_id") for r in rows if r.get("_db_id")}
+                del_barcodes = {r["barcode"]   for r in rows}
                 self._all_rows = [row for row in self._all_rows
-                                  if row.get("_db_id") != r.get("_db_id")
-                                  and row.get("barcode") != r["barcode"]]
+                                  if row.get("_db_id") not in del_db_ids
+                                  and row.get("barcode") not in del_barcodes]
                 self._refresh_ui()
                 self.status_lbl.config(
-                    text=f"✓  '{r['barcode']}' aus {sheets_txt} gelöscht", fg="#27ae60")
+                    text=f"✓  {n} Paket(e) gelöscht", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
@@ -5471,7 +5579,7 @@ class PickupHeuteTab:
         heute = (_dt.datetime.now()).strftime("%Y-%m-%d")
         filename = f"tour_zeiten_{heute}.json"
         try:
-            data = download_json_from_gdrive(GDRIVE_FOLDER_ID, filename)
+            data = download_json_from_gdrive(GDRIVE_FOLDER_TOUR_ZEITEN, filename)
             return data or {}
         except Exception:
             return {}
@@ -5553,41 +5661,68 @@ class PickupHeuteTab:
         filename = f"Orca_Abholer_{heute}{tour_suffix}.xlsx"
 
         def worker():
+            from openpyxl import Workbook as _WB
+            from openpyxl.styles import Font as _Fnt, PatternFill as _Fill, Alignment as _Aln, Border as _Brd, Side as _Side
+            from openpyxl.utils import get_column_letter as _gcl
+            import math as _math
+            # ── Excel-Datei bauen ──────────────────────────────────────
+            wb = _WB()
+            ws = wb.active
+            cols = list(df.columns)
+            _thin = _Side(style='thin', color='BFBFBF')
+            _border = _Brd(left=_thin, right=_thin, top=_thin, bottom=_thin)
+            _col_w = [22, 14, 16, 10, 28, 13, 16, 13, 13, 28, 28, 12, 16, 15, 12, 10]
+            for ci, cn in enumerate(cols, 1):
+                c = ws.cell(row=1, column=ci, value=cn)
+                c.fill = _Fill('solid', start_color='4F81BD', end_color='4F81BD')
+                c.font = _Fnt(name='Arial', bold=True, color='FFFFFF', size=10)
+                c.alignment = _Aln(horizontal='center', vertical='center', wrap_text=True)
+                c.border = _border
+                ws.column_dimensions[_gcl(ci)].width = _col_w[ci - 1] if ci <= len(_col_w) else 15
+            ws.row_dimensions[1].height = 30
+            for ri, (_, row) in enumerate(df.iterrows(), 2):
+                for ci, cn in enumerate(cols, 1):
+                    val = row[cn]
+                    if isinstance(val, float) and _math.isnan(val):
+                        val = None
+                    c = ws.cell(row=ri, column=ci, value=val)
+                    c.font = _Fnt(name='Arial', size=10)
+                    c.alignment = _Aln(vertical='center')
+                    c.border = _border
+            ws.freeze_panes = 'A2'
+
+            saved_paths = []
+            errors = []
+
+            # ── 1. NAS-Laufwerk W:\ ────────────────────────────────────
             try:
                 TOURLISTEN_DIR.mkdir(parents=True, exist_ok=True)
-                pfad = TOURLISTEN_DIR / filename
-                from openpyxl import Workbook as _WB
-                from openpyxl.styles import Font as _Fnt, PatternFill as _Fill, Alignment as _Aln, Border as _Brd, Side as _Side
-                from openpyxl.utils import get_column_letter as _gcl
-                import math as _math
-                wb = _WB()
-                ws = wb.active
-                cols = list(df.columns)
-                _thin = _Side(style='thin', color='BFBFBF')
-                _border = _Brd(left=_thin, right=_thin, top=_thin, bottom=_thin)
-                _col_w = [22, 14, 16, 10, 28, 13, 16, 13, 13, 28, 28, 12, 16, 15, 12, 10]
-                for ci, cn in enumerate(cols, 1):
-                    c = ws.cell(row=1, column=ci, value=cn)
-                    c.fill = _Fill('solid', start_color='4F81BD', end_color='4F81BD')
-                    c.font = _Fnt(name='Arial', bold=True, color='FFFFFF', size=10)
-                    c.alignment = _Aln(horizontal='center', vertical='center', wrap_text=True)
-                    c.border = _border
-                    ws.column_dimensions[_gcl(ci)].width = _col_w[ci - 1] if ci <= len(_col_w) else 15
-                ws.row_dimensions[1].height = 30
-                for ri, (_, row) in enumerate(df.iterrows(), 2):
-                    for ci, cn in enumerate(cols, 1):
-                        val = row[cn]
-                        if isinstance(val, float) and _math.isnan(val):
-                            val = None
-                        c = ws.cell(row=ri, column=ci, value=val)
-                        c.font = _Fnt(name='Arial', size=10)
-                        c.alignment = _Aln(vertical='center')
-                        c.border = _border
-                ws.freeze_panes = 'A2'
-                wb.save(pfad)
-                self.frame.after(0, lambda: self.status_lbl.config(text=f"✅ Tourliste {tour} gespeichert: {pfad}"))
+                pfad_nas = TOURLISTEN_DIR / filename
+                wb.save(pfad_nas)
+                saved_paths.append(str(pfad_nas))
             except Exception as e:
-                self.frame.after(0, lambda err=str(e): self.status_lbl.config(text=f"⚠ Tourliste-Speichern fehlgeschlagen: {err}"))
+                errors.append(f"NAS: {e}")
+
+            # ── 2. Lokaler Export-Ordner (Fallback) ────────────────────
+            try:
+                local_dir = self.get_export_folder() if self.get_export_folder else BASE_DIR
+                pfad_local = Path(local_dir) / filename
+                wb.save(pfad_local)
+                saved_paths.append(str(pfad_local))
+            except Exception as e:
+                errors.append(f"Lokal: {e}")
+
+            def _done():
+                if saved_paths:
+                    txt = f"✅  Tourliste {tour} ({len(tour_rows)} Pakete) → {saved_paths[-1]}"
+                    if len(saved_paths) > 1:
+                        txt = f"✅  Tourliste {tour} ({len(tour_rows)} Pakete) → NAS + Lokal"
+                    self.status_lbl.config(text=txt, fg="#27ae60")
+                else:
+                    self.status_lbl.config(
+                        text=f"❌  Tourliste {tour}: Speichern fehlgeschlagen – {' | '.join(errors[:2])}",
+                        fg="#c0392b")
+            self.frame.after(0, _done)
         threading.Thread(target=worker, daemon=True).start()
 
     def _restore_tour_buttons(self):
@@ -5632,7 +5767,7 @@ class PickupHeuteTab:
         tz       = _load_tour_zeiten()
         def worker():
             try:
-                upload_json_to_gdrive(tz, GDRIVE_FOLDER_ID, filename)
+                upload_json_to_gdrive(tz, GDRIVE_FOLDER_TOUR_ZEITEN, filename)
             except Exception as e:
                 self.frame.after(0, lambda err=str(e): self.status_lbl.config(
                     text=f"\u26a0 Tour-Sync fehlgeschlagen: {err}"))
@@ -5645,7 +5780,7 @@ class PickupHeuteTab:
         filename = f"tour_zeiten_{heute}.json"
         def worker():
             try:
-                remote = download_json_from_gdrive(GDRIVE_FOLDER_ID, filename)
+                remote = download_json_from_gdrive(GDRIVE_FOLDER_TOUR_ZEITEN, filename)
                 if not remote:
                     return
                 if not remote.get("t1") and not remote.get("t2"):
@@ -7749,14 +7884,25 @@ class App(tk.Tk):
             return
         if row_idx is None or row_idx >= len(self.tab_pay.filtered):
             return
-        row = self.tab_pay.filtered[row_idx]
-        oid = row[6] if len(row) > 6 else ""
-        if not oid:
+        # Multi-Select: wenn geklickte Zeile Teil mehrerer markierter ist → alle nehmen
+        try:
+            selected = sorted(set(self.tab_pay.get_selected_rows()))
+        except Exception:
+            selected = []
+        if selected and row_idx in selected and len(selected) > 1:
+            rows_to_act = [self.tab_pay.filtered[i] for i in selected
+                           if i < len(self.tab_pay.filtered)]
+        else:
+            rows_to_act = [self.tab_pay.filtered[row_idx]]
+        rows_to_act = [r for r in rows_to_act if len(r) > 6 and r[6]]
+        if not rows_to_act:
             return
+        n = len(rows_to_act)
+        suffix = f" ({n})" if n > 1 else ""
         menu = tk.Menu(self.nb, tearoff=0)
         menu.add_command(
-            label="✔  Als bezahlt markieren",
-            command=lambda: self._set_pay_bezahlt(row)
+            label=f"✔  Als bezahlt markieren{suffix}",
+            command=lambda: self._set_pay_bezahlt(rows_to_act)
         )
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -8083,6 +8229,10 @@ class App(tk.Tk):
         self.export_folder = Path(defaults["export_folder"])
         self.last_backup_date = defaults.get("last_backup_date", "")
         self.tourlisten_folder_id = defaults.get("tourlisten_folder_id", "")
+        # Master-PC-Flag: nur dieser PC macht automatische Backups (20:00).
+        # Marcel setzt in seiner settings.json "is_master_pc": true.
+        # Andere Kollegen lassen es auf false (Default).
+        self.is_master_pc = bool(defaults.get("is_master_pc", False))
 
     def _save_settings(self):
         import json as _json
@@ -8097,7 +8247,8 @@ class App(tk.Tk):
             pass
         data.update({"export_folder": str(self.export_folder),
                      "last_backup_date": self.last_backup_date,
-                     "tourlisten_folder_id": self.tourlisten_folder_id})
+                     "tourlisten_folder_id": self.tourlisten_folder_id,
+                     "is_master_pc": bool(self.is_master_pc)})
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 _json.dump(data, f, indent=2, ensure_ascii=False)
@@ -8125,6 +8276,12 @@ class App(tk.Tk):
     _BACKUP_HOUR = 20  # 20:00 Uhr
 
     def _schedule_backup_check(self):
+        # Nur Master-PC macht automatische Backups (verhindert Mehrfach-
+        # Uploads von verschiedenen Bombadil-Instanzen). Manueller Trigger
+        # über das Einstellungen-Menü funktioniert weiterhin auf jedem PC.
+        if not self.is_master_pc:
+            self.after(60_000 * 30, self._schedule_backup_check)
+            return
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
         if now.hour >= self._BACKUP_HOUR and self.last_backup_date != today_str:
