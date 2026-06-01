@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.56"
+VERSION = "1.0.57"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -537,6 +537,144 @@ def backup_abholer_db() -> Path:
         pass   # Drive-Fehler ist nicht kritisch – NAS-Backup bleibt primär
 
     return nas_path or (BACKUP_DIR / filename)
+
+
+# ── Timestamp-Cache (Option A: Schutz vor DB-Löschungen) ────────────────────
+# Speichert Abholbereit_At je Barcode lokal + auf Drive.
+# Regel: älterer Timestamp gewinnt immer → nach DB-Löschung werden die
+# Original-Timestamps wiederhergestellt, >7 Tage / Kissel >2W bleiben korrekt.
+
+_TS_CACHE_FILE  = BASE_DIR / "abholer_ts_cache.json"
+_TS_CACHE_NAME  = "abholer_ts_cache.json"
+_TS_COL_AB      = "Abholbereit_At"   # Spaltenname in Abholer_DB DataFrame
+
+def _load_ts_cache() -> dict:
+    """Lädt den Timestamp-Cache. Zuerst lokal, Fallback Google Drive."""
+    import json as _j
+    # 1. Lokal
+    try:
+        if _TS_CACHE_FILE.exists():
+            return _j.loads(_TS_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    # 2. Drive-Fallback
+    if not GDRIVE_AVAILABLE:
+        return {}
+    try:
+        data = download_json_from_gdrive(GDRIVE_FOLDER_ABHOLER, _TS_CACHE_NAME)
+        if data and isinstance(data, dict):
+            # Lokal speichern für schnelleren Zugriff beim nächsten Mal
+            try:
+                _TS_CACHE_FILE.write_text(_j.dumps(data, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+            return data
+    except Exception:
+        pass
+    return {}
+
+def _update_ts_cache(df: "pd.DataFrame") -> None:
+    """Erweitert den Cache mit neuen Timestamps aus dem DataFrame.
+    Älterer Timestamp gewinnt – bestehende Einträge werden NUR ersetzt wenn
+    der neue Timestamp älter ist (verhindert 'Reset' nach DB-Löschung)."""
+    import json as _j
+    import pandas as _pd
+
+    bc_col = first_existing(df, COL_BARCODE)
+    if bc_col is None:
+        return
+    ab_col = first_existing(df, COL_ABHOLBEREIT)
+    if ab_col is None:
+        return
+
+    cache = _load_ts_cache()
+    changed = False
+
+    for _, row in df.iterrows():
+        bc = str(row[bc_col]).strip() if row[bc_col] is not None else ""
+        if not bc or bc in ("nan", "None"):
+            continue
+        ts_raw = row[ab_col]
+        if ts_raw is None or (hasattr(ts_raw, "__class__") and
+                               ts_raw.__class__.__name__ == "NaTType"):
+            continue
+        try:
+            ts_str = _pd.Timestamp(ts_raw).isoformat()
+        except Exception:
+            continue
+        if bc not in cache or ts_str < cache[bc]:
+            cache[bc] = ts_str
+            changed = True
+
+    if not changed:
+        return
+
+    # Lokal speichern
+    try:
+        _TS_CACHE_FILE.write_text(_j.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    # Drive speichern (async im Hintergrund)
+    import threading as _thr
+    def _drive_save():
+        try:
+            upload_json_to_gdrive(cache, GDRIVE_FOLDER_ABHOLER, _TS_CACHE_NAME)
+        except Exception:
+            pass
+    _thr.Thread(target=_drive_save, daemon=True).start()
+
+def _apply_ts_cache(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Füllt fehlende oder zu neue Abholbereit_At Timestamps aus dem Cache.
+    'Zu neu' = nach dem letzten Backup-Datum → deutet auf DB-Löschung hin."""
+    import pandas as _pd
+
+    bc_col = first_existing(df, COL_BARCODE)
+    ab_col = first_existing(df, COL_ABHOLBEREIT)
+    if bc_col is None or ab_col is None:
+        return df
+
+    cache = _load_ts_cache()
+    if not cache:
+        return df
+
+    df = df.copy()
+    # Sicherheitsdatum: Backups existieren ab 2026-05-23 – alles was älter ist
+    # als dieses Datum im Cache ist "vertrauenswürdig" original.
+    for idx, row in df.iterrows():
+        bc = str(row[bc_col]).strip() if row[bc_col] is not None else ""
+        if not bc or bc not in cache:
+            continue
+        current = row[ab_col]
+        cached_str = cache[bc]
+        cached_ts  = _pd.Timestamp(cached_str)
+        # Fehlender Timestamp → aus Cache
+        is_missing = (current is None or
+                      (hasattr(current, "__class__") and
+                       current.__class__.__name__ == "NaTType") or
+                      (isinstance(current, float) and str(current) == "nan"))
+        if is_missing:
+            df.at[idx, ab_col] = cached_ts
+            continue
+        # Zu neuer Timestamp → Cache-Wert ist älter → Cache gewinnt
+        try:
+            current_ts = _pd.Timestamp(current)
+            if cached_ts < current_ts:
+                df.at[idx, ab_col] = cached_ts
+        except Exception:
+            pass
+    return df
+
+
+def fetch_abholer_cached() -> "pd.DataFrame":
+    """Lädt Abholer_DB aus OrcaScan, aktualisiert den Timestamp-Cache und
+    stellt fehlende/zurückgesetzte Timestamps wieder her.
+    Ersatz für fetch_abholer_orca() an allen Stellen wo die Timestamps
+    für >7 Tage / Kissel >2W wichtig sind."""
+    df = fetch_abholer_orca()
+    if df is not None and not df.empty:
+        _update_ts_cache(df)
+        df = _apply_ts_cache(df)
+    return df
 
 
 def _fetch_single_archiv_gdrive(filename: str, folder_id: str) -> "pd.DataFrame | None":
@@ -3423,6 +3561,9 @@ class StatistikTab:
         # (kann vorkommen wenn Abholer_DB später fertig ist als DHL-Daten)
         if self._normal_df is not None or self._express_df is not None:
             self._dhl_recalculate()
+        # Cache nach jedem Refresh aktualisieren, damit das Handy-Dashboard
+        # tagsüber frisch bleibt (nur wenn DHL-Daten vorhanden, s. Guard).
+        self._try_save_cache_if_ready()
 
     def load_cache_async(self):
         """Versucht beim Start den Statistik-Cache aus Drive zu laden.
@@ -4930,7 +5071,7 @@ class TagesbotenAbgleichTab:
                 self.frame.after(0, lambda: self.status_lbl.config(
                     text="⏳  Lade Abholer_DB aus OrcaScan …"))
                 try:
-                    abholer_df = fetch_abholer_orca()
+                    abholer_df = fetch_abholer_cached()
                 except Exception as e:
                     self.frame.after(0, lambda err=e: _on_error(err))
                     return
@@ -6241,13 +6382,13 @@ class PickupHeuteTab:
                 self._force_reload_abholer = False
                 self.frame.after(0, lambda: self.status_lbl.config(
                     text="⏳  Lade Abholer_DB frisch aus OrcaScan …"))
-                abholer_df = fetch_abholer_orca()
+                abholer_df = fetch_abholer_cached()
             else:
                 abholer_df = self.get_abholer_df() if self.get_abholer_df else None
                 if abholer_df is None or abholer_df.empty:
                     self.frame.after(0, lambda: self.status_lbl.config(
                         text="⏳  Lade Abholer_DB aus OrcaScan …"))
-                    abholer_df = fetch_abholer_orca()
+                    abholer_df = fetch_abholer_cached()
 
             self.frame.after(0, lambda: self.status_lbl.config(
                 text="⏳  Lade Tagesbote-Sheet …"))
