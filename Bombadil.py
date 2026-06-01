@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.48"
+VERSION = "1.0.49"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3558,11 +3558,18 @@ class StatistikTab:
             tour_bcs = _tour_bcs_in_range(start, end)
             return len(db_bcs | tour_bcs)
 
+        def count_abhol_in_range(start, end=None):
+            """Abholungen: DB-Daten (exakt), Fallback auf Tour-JSONs bei historischen Lücken."""
+            db_count = count_in_range("_abhol_eff", start, end)
+            if db_count > 0:
+                return db_count
+            return len(_tour_bcs_in_range(start, end))
+
         # ── Kacheln ──────────────────────────────────────────────────
         n_aw = count_anlief_in_range(week_start)
         n_am = count_anlief_in_range(month_start)
-        n_bw = count_in_range("_abhol_eff",  week_start)
-        n_bm = count_in_range("_abhol_eff",  month_start)
+        n_bw = count_abhol_in_range(week_start)
+        n_bm = count_abhol_in_range(month_start)
 
         self._lbl_anlief_woche.config(text=str(n_aw))
         self._lbl_anlief_monat.config(text=str(n_am))
@@ -3577,7 +3584,7 @@ class StatistikTab:
             kw = ws.isocalendar()[1]
             label = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
             na = count_anlief_in_range(ws, we)
-            nb = count_in_range("_abhol_eff",  ws, we)
+            nb = count_abhol_in_range(ws, we)
             weekly.append((label, na, nb))
 
         self._pu_weekly_data = weekly
@@ -3589,7 +3596,7 @@ class StatistikTab:
             d_next = d + timedelta(days=1)
             label  = d.strftime("%d.%m.")
             na = count_anlief_in_range(d, d_next)
-            nb = count_in_range("_abhol_eff",  d, d_next)
+            nb = count_abhol_in_range(d, d_next)
             daily.append((label, na, nb, d.weekday()))  # weekday: 0=Mo
         self._pu_daily_data = daily
 
@@ -3611,7 +3618,7 @@ class StatistikTab:
             label_m = ms.strftime("%b %y")   # z.B. "Mär 26"
             key_m   = ms.strftime("%Y-%m")    # z.B. "2026-03" → für Ziele
             na_m = count_anlief_in_range(ms, me)
-            nb_m = count_in_range("_abhol_eff",  ms, me)
+            nb_m = count_abhol_in_range(ms, me)
             monthly.append((label_m, na_m, nb_m, key_m))
 
         self._pu_monthly_data = monthly
@@ -4049,14 +4056,54 @@ class StatistikTab:
                 m = m & (dates < end)
             return int(m.sum())
 
+        # ── PU-Lieferungen für DHL-Chart (Verpackt_At + Tour-JSON-Fallback) ──
+        # Der grüne Balken zeigt PU-Anlieferungen (gleiche Logik wie 🚐 im PU-Chart),
+        # nicht Kundenabholungen – damit vergleicht der Chart die drei Lieferarten.
+        _dhl_tour_archive = _load_tour_barcodes_archive()  # {date: set_of_barcodes}
+
+        # PU-Daten aufbauen (Live + Archiv, dedupliziert)
+        _pu_frames = []
+        if self._main_df is not None and not self._main_df.empty:
+            _pu_frames.append(self._main_df)
+        if self._archiv_df is not None and not self._archiv_df.empty:
+            _pu_frames.append(self._archiv_df)
+        if _pu_frames:
+            _pu_combined = pd.concat(_pu_frames, ignore_index=True)
+            _pu_bc_col   = first_existing(_pu_combined, COL_BARCODE)
+            _pu_vp_col   = first_existing(_pu_combined, COL_VERPACKT_AT)
+            if _pu_bc_col and _pu_vp_col:
+                _pu_combined = _pu_combined.drop_duplicates(subset=[_pu_bc_col], keep="first")
+                _pu_combined[_pu_vp_col] = pd.to_datetime(
+                    _pu_combined[_pu_vp_col], errors="coerce", utc=True).dt.tz_convert(None)
+        else:
+            _pu_combined = None
+            _pu_bc_col   = None
+            _pu_vp_col   = None
+
+        def count_pu_in_range(start, end=None):
+            """PU-Lieferungen = DB-Barcodes (Verpackt_At) UNION Tour-JSON-Barcodes."""
+            db_bcs = set()
+            if _pu_combined is not None and _pu_vp_col and _pu_bc_col:
+                s    = _pu_combined[_pu_vp_col].dt.date
+                mask = (s >= start).fillna(False)
+                if end:
+                    mask = mask & (s < end).fillna(False)
+                db_bcs = set(_pu_combined.loc[mask, _pu_bc_col].dropna().astype(str).str.strip())
+            # Tour-JSON-Fallback für fehlende Zeiträume
+            tour_bcs = set()
+            for d, bc_set in _dhl_tour_archive.items():
+                if d >= start and (end is None or d < end):
+                    tour_bcs |= bc_set
+            return len(db_bcs | tour_bcs)
+
         # Kacheln
-        n_woche  = count(normal_dates,   week_start)  + count(express_dates,  week_start)  + count(abholung_dates, week_start)
-        n_monat  = count(normal_dates,   month_start) + count(express_dates,  month_start) + count(abholung_dates, month_start)
+        n_woche  = count(normal_dates,   week_start)  + count(express_dates,  week_start)  + count_pu_in_range(week_start)
+        n_monat  = count(normal_dates,   month_start) + count(express_dates,  month_start) + count_pu_in_range(month_start)
         self._lbl_gesamt_woche.config(   text=str(n_woche))
         self._lbl_gesamt_monat.config(   text=str(n_monat))
         self._lbl_normal_woche.config(   text=str(count(normal_dates,   week_start)))
         self._lbl_express_woche.config(  text=str(count(express_dates,  week_start)))
-        self._lbl_abholung_woche.config( text=str(count(abholung_dates, week_start)))
+        self._lbl_abholung_woche.config( text=str(count_pu_in_range(week_start)))
 
         # Wochendaten (letzte 4 Kalenderwochen)
         weekly = []
@@ -4066,7 +4113,7 @@ class StatistikTab:
             kw = ws.isocalendar()[1]
             lbl = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
             weekly.append((lbl, count(normal_dates, ws, we),
-                           count(express_dates, ws, we), count(abholung_dates, ws, we)))
+                           count(express_dates, ws, we), count_pu_in_range(ws, we)))
         self._dhl_weekly_data = weekly
 
         # Tagesdaten (letzte 28 Tage)
@@ -4077,7 +4124,7 @@ class StatistikTab:
             daily.append((d.strftime("%d.%m."),
                           count(normal_dates,   d, d_next),
                           count(express_dates,  d, d_next),
-                          count(abholung_dates, d, d_next),
+                          count_pu_in_range(d, d_next),
                           d.weekday()))
         self._dhl_daily_data = daily
 
@@ -4095,7 +4142,7 @@ class StatistikTab:
             monthly.append((ms.strftime("%b %y"),
                             count(normal_dates,   ms, me),
                             count(express_dates,  ms, me),
-                            count(abholung_dates, ms, me),
+                            count_pu_in_range(ms, me),
                             ms.strftime("%Y-%m")))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
