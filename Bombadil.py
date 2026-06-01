@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.49"
+VERSION = "1.0.50"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3005,7 +3005,7 @@ class StatistikTab:
     # Farben DHL
     _COL_NORMAL   = "#f9a825"   # gelb  – DHL Normal
     _COL_EXPRESS  = "#b71c1c"   # rot   – DHL Express
-    _COL_ABHOLUNG = "#2e7d32"   # grün  – Kundenabholungen
+    _COL_ABHOLUNG = "#2e7d32"   # grün  – Pickup
     _COL_BG       = "#f0f2f5"
 
     def __init__(self, parent, start_loading=None, stop_loading=None):
@@ -3219,7 +3219,7 @@ class StatistikTab:
         leg_dhl.pack(fill="x", padx=16, pady=(0, 6))
         for color, text in [(self._COL_NORMAL,   "🚛 DHL Normal"),
                             (self._COL_EXPRESS,  "🚚 DHL Express"),
-                            (self._COL_ABHOLUNG, "🏃 Abholung")]:
+                            (self._COL_ABHOLUNG, "🏃 Pickup")]:
             tk.Frame(leg_dhl, bg=color, width=14, height=14, relief="flat").pack(side="left")
             tk.Label(leg_dhl, text=f" {text}   ", font=("Segoe UI", 9),
                      bg=self._COL_BG, fg="#2c3e50").pack(side="left")
@@ -3265,7 +3265,7 @@ class StatistikTab:
 
         self._lbl_normal_woche   = _card_dhl(cards_dhl, self._COL_NORMAL,   "🚛", "DHL Normal",  "Diese Woche", "#fff9c4")
         self._lbl_express_woche  = _card_dhl(cards_dhl, self._COL_EXPRESS,  "🚚", "DHL Express", "Diese Woche", "#ef9a9a")
-        self._lbl_abholung_woche = _card_dhl(cards_dhl, self._COL_ABHOLUNG, "🏃", "Abholung",    "Diese Woche", "#a5d6a7")
+        self._lbl_abholung_woche = _card_dhl(cards_dhl, self._COL_ABHOLUNG, "🏃", "Pickup",      "Diese Woche", "#a5d6a7")
 
         tk.Frame(self._inner, bg="#dde2e8", height=1).pack(fill="x", padx=16, pady=(0, 8))
 
@@ -4152,7 +4152,7 @@ class StatistikTab:
         n_e = len(self._express_df) if self._express_df is not None else 0
         n_a = int(abholung_dates.count()) if not abholung_dates.empty else 0
         self._dhl_status_lbl.config(
-            text=f"Stand {ts}  –  {n_n} Normal · {n_e} Express · {n_a} Abholungen")
+            text=f"Stand {ts}  –  {n_n} Normal · {n_e} Express · {n_a} Pickup")
         self._dhl_redraw_chart()
 
     def _dhl_redraw_chart(self):
@@ -4249,7 +4249,7 @@ class StatistikTab:
                 c.create_rectangle(PAD_LEFT, y3, PAD_LEFT + bw3, y3 + BAR_H,
                                    fill=self._COL_ABHOLUNG, outline="")
             c.create_text(PAD_LEFT + bw3 + 6, y3 + BAR_H // 2,
-                          text=f"🏃 {n_abholung}", anchor="w",
+                          text=f"🏃 {n_abholung} PU", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#1b5e20")
 
             # ── Gesamt-Balken + Ziel-Linie (nur Monatsansicht) ─────────────
