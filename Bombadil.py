@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.54"
+VERSION = "1.0.55"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -624,20 +624,39 @@ def backup_dhl_to_gdrive() -> dict:
 
 
 STATISTIK_CACHE_FILENAME = "statistik_cache.json"
+STATISTIK_CACHE_LOCAL    = BASE_DIR / STATISTIK_CACHE_FILENAME
 
 def load_statistik_cache() -> "dict | None":
-    """Lädt den Statistik-Cache aus dem Drive-Ordner 'Clouddaten'.
-    Gibt None zurück wenn nicht vorhanden oder fehlerhaft."""
+    """Lädt den Statistik-Cache – zuerst lokal, dann Drive als Fallback.
+    Lokal ist immer verfügbar; Drive dient als Sync für andere PCs."""
+    import json as _json
+    # 1. Lokale Datei (schnell, kein Netzwerk nötig)
+    try:
+        if STATISTIK_CACHE_LOCAL.exists():
+            data = _json.loads(STATISTIK_CACHE_LOCAL.read_text(encoding="utf-8"))
+            if data and ("pu" in data or "dhl" in data):
+                return data
+    except Exception:
+        pass
+    # 2. Fallback: Drive (für andere PCs ohne lokale Datei)
     try:
         data = download_json_from_gdrive(GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
-        if not data or "tage" not in data:
-            return None
-        return data
+        if data and ("pu" in data or "dhl" in data):
+            return data
     except Exception:
-        return None
+        pass
+    return None
 
 def save_statistik_cache(cache: dict):
-    """Speichert den Statistik-Cache als JSON in Drive-Ordner 'Clouddaten'."""
+    """Speichert den Statistik-Cache lokal UND auf Drive."""
+    import json as _json
+    # 1. Lokal speichern (sofort, kein Netzwerk)
+    try:
+        STATISTIK_CACHE_LOCAL.write_text(
+            _json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    # 2. Drive hochladen (für andere PCs)
     try:
         upload_json_to_gdrive(cache, GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
     except Exception:
