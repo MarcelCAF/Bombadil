@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.53"
+VERSION = "1.0.54"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3526,38 +3526,33 @@ class StatistikTab:
         threading.Thread(target=_worker, daemon=True).start()
 
     def load_dhl_async(self):
-        """Lädt DHL Normal + DHL Express aus OrcaScan im Hintergrund."""
+        """Lädt DHL-Statistik aus Drive-Archiv + NAS (kein OrcaScan).
+        OrcaScan hatte nur ~5k Live-Einträge; alle historischen Daten
+        liegen im NAS-Archiv. Tägliche Drive-Backups halten es aktuell."""
         if self._dhl_loading:
             return
         self._dhl_loading = True
-        self._dhl_status_lbl.config(text="⏳  Lade DHL-Daten …")
-        self._start_loading_cb("⏳  Lade DHL-Daten aus OrcaScan …")
+        self._dhl_status_lbl.config(text="⏳  Lade DHL-Archiv …")
+        self._start_loading_cb("⏳  Lade DHL-Archiv …")
 
         def _worker():
             try:
-                _drop       = {"signature", "packagePhoto"}
-                normal_live  = fetch_sheet_orca(ORCA_DHL_NORMAL_SHEET_ID, drop_cols=_drop)
-                express_live = fetch_sheet_orca(ORCA_DHL_EX_SHEET_ID,     drop_cols=_drop)
-
-                # Drive-Archiv (best-effort) für historische OrcaScan-Daten
+                # Drive-Archiv (tägliche Backups seit heute)
                 try:
                     normal_arch, express_arch = fetch_dhl_archiv_gdrive()
                 except Exception:
                     normal_arch, express_arch = pd.DataFrame(), pd.DataFrame()
 
-                # NAS-Archiv (alte manuelle Excel-Sicherungen, best-effort)
+                # NAS-Archiv (alle historischen Daten)
                 try:
                     normal_nas  = load_dhl_nas_archive(DHL_NAS_NORMAL_DIR)
                     express_nas = load_dhl_nas_archive(DHL_NAS_EXPRESS_DIR)
                 except Exception:
                     normal_nas, express_nas = pd.DataFrame(), pd.DataFrame()
 
-                # Alle drei Quellen mergen (Live + Drive-Archiv + NAS-Archiv),
-                # per Barcode dedupliziert (Live gewinnt).
-                normal_df  = _merge_live_archiv(
-                    normal_live, _merge_live_archiv(normal_arch, normal_nas))
-                express_df = _merge_live_archiv(
-                    express_live, _merge_live_archiv(express_arch, express_nas))
+                # Drive + NAS mergen, per Barcode dedupliziert (Drive gewinnt)
+                normal_df  = _merge_live_archiv(normal_arch, normal_nas)
+                express_df = _merge_live_archiv(express_arch, express_nas)
 
                 # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
                 express_df = apply_dhl_express_korrektur(express_df)
