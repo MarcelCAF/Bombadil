@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.55"
+VERSION = "1.0.56"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -630,18 +630,24 @@ def load_statistik_cache() -> "dict | None":
     """Lädt den Statistik-Cache – zuerst lokal, dann Drive als Fallback.
     Lokal ist immer verfügbar; Drive dient als Sync für andere PCs."""
     import json as _json
+    MIN_VERSION = 3   # ältere Caches haben anderes Tupel-Layout → verwerfen
+
+    def _valid(data):
+        return bool(data) and ("pu" in data or "dhl" in data) \
+            and data.get("version", 0) >= MIN_VERSION
+
     # 1. Lokale Datei (schnell, kein Netzwerk nötig)
     try:
         if STATISTIK_CACHE_LOCAL.exists():
             data = _json.loads(STATISTIK_CACHE_LOCAL.read_text(encoding="utf-8"))
-            if data and ("pu" in data or "dhl" in data):
+            if _valid(data):
                 return data
     except Exception:
         pass
     # 2. Fallback: Drive (für andere PCs ohne lokale Datei)
     try:
         data = download_json_from_gdrive(GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
-        if data and ("pu" in data or "dhl" in data):
+        if _valid(data):
             return data
     except Exception:
         pass
@@ -674,7 +680,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
         return [list(r) for r in rows] if rows else []
 
     return {
-        "version":   2,
+        "version":   3,
         "erstellt":  _dt.date.today().isoformat(),
         "pu": {
             "weekly":  _ser(pu_weekly),
@@ -3083,6 +3089,8 @@ class StatistikTab:
     _COL_NORMAL   = "#f9a825"   # gelb  – DHL Normal
     _COL_EXPRESS  = "#b71c1c"   # rot   – DHL Express
     _COL_ABHOLUNG = "#2e7d32"   # grün  – Pickup
+    _COL_SAMEDAY  = "#1565c0"   # blau  – Same day delivery
+    _COL_NEXTDAY  = "#6a1b9a"   # lila  – Next day delivery
     _COL_BG       = "#f0f2f5"
 
     def __init__(self, parent, start_loading=None, stop_loading=None):
@@ -3296,7 +3304,9 @@ class StatistikTab:
         leg_dhl.pack(fill="x", padx=16, pady=(0, 6))
         for color, text in [(self._COL_NORMAL,   "🚛 DHL Normal"),
                             (self._COL_EXPRESS,  "🚚 DHL Express"),
-                            (self._COL_ABHOLUNG, "🏃 Pickup")]:
+                            (self._COL_ABHOLUNG, "🏃 Pickup"),
+                            (self._COL_SAMEDAY,  "🔵 Same day"),
+                            (self._COL_NEXTDAY,  "🟣 Next day")]:
             tk.Frame(leg_dhl, bg=color, width=14, height=14, relief="flat").pack(side="left")
             tk.Label(leg_dhl, text=f" {text}   ", font=("Segoe UI", 9),
                      bg=self._COL_BG, fg="#2c3e50").pack(side="left")
@@ -3343,6 +3353,8 @@ class StatistikTab:
         self._lbl_normal_woche   = _card_dhl(cards_dhl, self._COL_NORMAL,   "🚛", "DHL Normal",  "Diese Woche", "#fff9c4")
         self._lbl_express_woche  = _card_dhl(cards_dhl, self._COL_EXPRESS,  "🚚", "DHL Express", "Diese Woche", "#ef9a9a")
         self._lbl_abholung_woche = _card_dhl(cards_dhl, self._COL_ABHOLUNG, "🏃", "Pickup",      "Diese Woche", "#a5d6a7")
+        self._lbl_sameday_woche  = _card_dhl(cards_dhl, self._COL_SAMEDAY,  "🔵", "Same day",    "Diese Woche", "#bbdefb")
+        self._lbl_nextday_woche  = _card_dhl(cards_dhl, self._COL_NEXTDAY,  "🟣", "Next day",    "Diese Woche", "#e1bee7")
 
         tk.Frame(self._inner, bg="#dde2e8", height=1).pack(fill="x", padx=16, pady=(0, 8))
 
@@ -3487,6 +3499,8 @@ class StatistikTab:
                 self._lbl_normal_woche.config(  text=str(tiles_dhl.get("normal_woche",  "–")))
                 self._lbl_express_woche.config( text=str(tiles_dhl.get("express_woche", "–")))
                 self._lbl_abholung_woche.config(text=str(tiles_dhl.get("pickup_woche",  "–")))
+                self._lbl_sameday_woche.config( text=str(tiles_dhl.get("sameday_woche", "–")))
+                self._lbl_nextday_woche.config( text=str(tiles_dhl.get("nextday_woche", "–")))
             self._dhl_redraw_chart()
         except Exception as _e:
             print(f"[Cache] Fehler beim Anwenden: {_e}")
@@ -3517,6 +3531,8 @@ class StatistikTab:
             "normal_woche":  _txt(self._lbl_normal_woche),
             "express_woche": _txt(self._lbl_express_woche),
             "pickup_woche":  _txt(self._lbl_abholung_woche),
+            "sameday_woche": _txt(self._lbl_sameday_woche),
+            "nextday_woche": _txt(self._lbl_nextday_woche),
         }
         cache = build_statistik_cache(
             self._pu_weekly_data,  self._pu_daily_data,  self._pu_monthly_data,
@@ -4287,16 +4303,33 @@ class StatistikTab:
                     tour_bcs |= bc_set
             return len(db_bcs | tour_bcs)
 
+        # ── Same day / Next day delivery ────────────────────────────
+        # Noch keine Datenquelle vorhanden → liefern aktuell 0.
+        # Sobald die Daten existieren, hier die echte Zählung einbauen
+        # (analog zu count(...) / count_pu_in_range(...)).
+        def count_sameday_in_range(start, end=None):
+            return 0
+
+        def count_nextday_in_range(start, end=None):
+            return 0
+
         # Kacheln
-        n_woche  = count(normal_dates,   week_start)  + count(express_dates,  week_start)  + count_pu_in_range(week_start)
-        n_monat  = count(normal_dates,   month_start) + count(express_dates,  month_start) + count_pu_in_range(month_start)
+        n_woche  = (count(normal_dates,   week_start)  + count(express_dates,  week_start)
+                    + count_pu_in_range(week_start)
+                    + count_sameday_in_range(week_start) + count_nextday_in_range(week_start))
+        n_monat  = (count(normal_dates,   month_start) + count(express_dates,  month_start)
+                    + count_pu_in_range(month_start)
+                    + count_sameday_in_range(month_start) + count_nextday_in_range(month_start))
         self._lbl_gesamt_woche.config(   text=str(n_woche))
         self._lbl_gesamt_monat.config(   text=str(n_monat))
         self._lbl_normal_woche.config(   text=str(count(normal_dates,   week_start)))
         self._lbl_express_woche.config(  text=str(count(express_dates,  week_start)))
         self._lbl_abholung_woche.config( text=str(count_pu_in_range(week_start)))
+        self._lbl_sameday_woche.config(  text=str(count_sameday_in_range(week_start)))
+        self._lbl_nextday_woche.config(  text=str(count_nextday_in_range(week_start)))
 
         # Wochendaten (letzte 4 Kalenderwochen)
+        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday)
         weekly = []
         for i in range(3, -1, -1):
             ws = week_start - timedelta(weeks=i)
@@ -4304,10 +4337,12 @@ class StatistikTab:
             kw = ws.isocalendar()[1]
             lbl = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
             weekly.append((lbl, count(normal_dates, ws, we),
-                           count(express_dates, ws, we), count_pu_in_range(ws, we)))
+                           count(express_dates, ws, we), count_pu_in_range(ws, we),
+                           count_sameday_in_range(ws, we), count_nextday_in_range(ws, we)))
         self._dhl_weekly_data = weekly
 
         # Tagesdaten (letzte 28 Tage)
+        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday, weekday)
         daily = []
         for i in range(27, -1, -1):
             d      = today - timedelta(days=i)
@@ -4316,10 +4351,13 @@ class StatistikTab:
                           count(normal_dates,   d, d_next),
                           count(express_dates,  d, d_next),
                           count_pu_in_range(d, d_next),
+                          count_sameday_in_range(d, d_next),
+                          count_nextday_in_range(d, d_next),
                           d.weekday()))
         self._dhl_daily_data = daily
 
         # Monatsdaten (letzte 6 Monate)
+        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday, mkey)
         monthly = []
         for i in range(5, -1, -1):
             m_year  = today.year
@@ -4334,6 +4372,8 @@ class StatistikTab:
                             count(normal_dates,   ms, me),
                             count(express_dates,  ms, me),
                             count_pu_in_range(ms, me),
+                            count_sameday_in_range(ms, me),
+                            count_nextday_in_range(ms, me),
                             ms.strftime("%Y-%m")))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
@@ -4380,28 +4420,31 @@ class StatistikTab:
         dhl_goals = {}
         if view == "monthly":
             dhl_goals = _load_monthly_goals("dhl")
-            max_sum  = max((row[1] + row[2] + row[3]) for row in data) or 1
+            max_sum  = max((row[1] + row[2] + row[3] + row[4] + row[5]) for row in data) or 1
             max_goal = max(dhl_goals.values()) if dhl_goals else 0
             max_cnt  = max(max_sum, max_goal, 1)
         else:
-            max_cnt = max(max(row[1], row[2], row[3]) for row in data) or 1
+            max_cnt = max(max(row[1], row[2], row[3], row[4], row[5]) for row in data) or 1
 
-        # In Monatsansicht zusätzlich einen "Gesamt"-Balken (4. Reihe)
+        # 5 Balken pro Gruppe (Normal/Express/Pickup/Same day/Next day)
+        # In Monatsansicht zusätzlich einen "Gesamt"-Balken
+        N_BARS    = 5
         SUM_BAR_H = 12
         SUM_GAP   = 4
         if view == "monthly":
-            group_h = 3 * BAR_H + 2 * BAR_GAP + SUM_GAP + SUM_BAR_H
+            group_h = N_BARS * BAR_H + (N_BARS - 1) * BAR_GAP + SUM_GAP + SUM_BAR_H
         else:
-            group_h = 3 * BAR_H + 2 * BAR_GAP
+            group_h = N_BARS * BAR_H + (N_BARS - 1) * BAR_GAP
 
         for i, row in enumerate(data):
             label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
-            mkey = row[4] if len(row) > 4 else None
+            n_sameday, n_nextday = row[4], row[5]
+            mkey = row[6] if len(row) > 6 else None
             y0    = PAD_TOP + i * (group_h + GROUP_GAP)
             y_mid = y0 + group_h // 2
 
             # Gesamt rechts oben anzeigen
-            n_ges = n_normal + n_express + n_abholung
+            n_ges = n_normal + n_express + n_abholung + n_sameday + n_nextday
             c.create_text(PAD_LEFT - 8, y_mid - 6, text=label,
                           anchor="e", font=("Segoe UI", 9, "bold"), fill="#2c3e50")
             c.create_text(PAD_LEFT - 8, y_mid + 8, text=f"∑ {n_ges}",
@@ -4443,10 +4486,34 @@ class StatistikTab:
                           text=f"🏃 {n_abholung} PU", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#1b5e20")
 
+            # Bar 4: Same day delivery
+            y4  = y0 + 3 * (BAR_H + BAR_GAP)
+            bw4 = max(int(n_sameday / max_cnt * bar_area_w), 4) if n_sameday else 0
+            c.create_rectangle(PAD_LEFT, y4, PAD_LEFT + bar_area_w, y4 + BAR_H,
+                                fill="#bbdefb", outline="")
+            if bw4:
+                c.create_rectangle(PAD_LEFT, y4, PAD_LEFT + bw4, y4 + BAR_H,
+                                   fill=self._COL_SAMEDAY, outline="")
+            c.create_text(PAD_LEFT + bw4 + 6, y4 + BAR_H // 2,
+                          text=f"🔵 {n_sameday}", anchor="w",
+                          font=("Segoe UI", 9, "bold"), fill="#0d47a1")
+
+            # Bar 5: Next day delivery
+            y5  = y0 + 4 * (BAR_H + BAR_GAP)
+            bw5 = max(int(n_nextday / max_cnt * bar_area_w), 4) if n_nextday else 0
+            c.create_rectangle(PAD_LEFT, y5, PAD_LEFT + bar_area_w, y5 + BAR_H,
+                                fill="#e1bee7", outline="")
+            if bw5:
+                c.create_rectangle(PAD_LEFT, y5, PAD_LEFT + bw5, y5 + BAR_H,
+                                   fill=self._COL_NEXTDAY, outline="")
+            c.create_text(PAD_LEFT + bw5 + 6, y5 + BAR_H // 2,
+                          text=f"🟣 {n_nextday}", anchor="w",
+                          font=("Segoe UI", 9, "bold"), fill="#4a148c")
+
             # ── Gesamt-Balken + Ziel-Linie (nur Monatsansicht) ─────────────
             if view == "monthly":
-                n_sum = n_normal + n_express + n_abholung
-                y_sum = y3 + BAR_H + SUM_GAP
+                n_sum = n_normal + n_express + n_abholung + n_sameday + n_nextday
+                y_sum = y5 + BAR_H + SUM_GAP
                 bw_s  = max(int(n_sum / max_cnt * bar_area_w), 4) if n_sum else 0
                 # Hintergrund + dunkler Gesamt-Balken
                 c.create_rectangle(PAD_LEFT, y_sum, PAD_LEFT + bar_area_w,
@@ -4488,8 +4555,9 @@ class StatistikTab:
         GROUP_GAP = 18
         SUM_BAR_H = 12
         SUM_GAP   = 4
-        # In Monatsansicht: 3 normale Balken + Gesamt-Balken
-        group_h   = 3 * BAR_H + 2 * BAR_GAP + SUM_GAP + SUM_BAR_H
+        N_BARS    = 5
+        # In Monatsansicht: 5 normale Balken + Gesamt-Balken
+        group_h   = N_BARS * BAR_H + (N_BARS - 1) * BAR_GAP + SUM_GAP + SUM_BAR_H
         row_h     = group_h + GROUP_GAP
         rel_y     = event.y - PAD_TOP
         if rel_y < 0:
@@ -4498,9 +4566,9 @@ class StatistikTab:
         if idx < 0 or idx >= len(data):
             return
         row = data[idx]
-        if len(row) < 5:
+        if len(row) < 7:
             return
-        label, mkey = row[0], row[4]
+        label, mkey = row[0], row[6]
         from tkinter import simpledialog
         goals = _load_monthly_goals("dhl")
         current = goals.get(mkey, 0)
@@ -4530,12 +4598,13 @@ class StatistikTab:
         chart_h = canvas_h - PAD_TOP - PAD_BOTTOM
         n_days  = len(data)
         group_w = chart_w / n_days
-        # 3 Balken pro Tag: etwas schmaler, mittig gruppiert
-        bar_w   = max(int(group_w * 0.24), 2)
-        bar_gap = max(int(group_w * 0.04), 1)
+        # 5 Balken pro Tag: schmaler, mittig gruppiert
+        bar_w   = max(int(group_w * 0.15), 2)
+        bar_gap = max(int(group_w * 0.02), 1)
         base_y  = canvas_h - PAD_BOTTOM
 
-        max_cnt = max((max(na, nb, nc) for _, na, nb, nc, _ in data), default=1) or 1
+        max_cnt = max((max(na, nb, nc, nd, ne) for _, na, nb, nc, nd, ne, _ in data),
+                      default=1) or 1
 
         y_half = PAD_TOP + chart_h // 2
         c.create_line(PAD_LEFT, y_half, canvas_w - PAD_RIGHT, y_half,
@@ -4543,7 +4612,7 @@ class StatistikTab:
         c.create_text(PAD_LEFT - 2, y_half, text=str(max_cnt // 2),
                       anchor="e", font=("Segoe UI", 7), fill="#bbb")
 
-        for i, (label, n_normal, n_express, n_abholung, weekday) in enumerate(data):
+        for i, (label, n_normal, n_express, n_abholung, n_sameday, n_nextday, weekday) in enumerate(data):
             gx = PAD_LEFT + (i + 0.5) * group_w
 
             if weekday == 0 and i > 0:
@@ -4551,8 +4620,8 @@ class StatistikTab:
                 c.create_line(x_sep, PAD_TOP, x_sep, base_y,
                               fill="#dde2e8", dash=(2, 3))
 
-            # 3 Balken nebeneinander, mittig zentriert
-            total_w = 3 * bar_w + 2 * bar_gap
+            # 5 Balken nebeneinander, mittig zentriert
+            total_w = 5 * bar_w + 4 * bar_gap
             x_start = int(gx - total_w / 2)
 
             # Bar 1: DHL Normal
@@ -4582,11 +4651,29 @@ class StatistikTab:
                 c.create_rectangle(x3_l, base_y - h3, x3_r, base_y,
                                    fill=self._COL_ABHOLUNG, outline="")
 
+            # Bar 4: Same day
+            x4_l = x3_r + bar_gap
+            x4_r = x4_l + bar_w
+            h4   = max(int(n_sameday / max_cnt * chart_h), 1) if n_sameday else 0
+            c.create_rectangle(x4_l, PAD_TOP, x4_r, base_y, fill="#bbdefb", outline="")
+            if h4:
+                c.create_rectangle(x4_l, base_y - h4, x4_r, base_y,
+                                   fill=self._COL_SAMEDAY, outline="")
+
+            # Bar 5: Next day
+            x5_l = x4_r + bar_gap
+            x5_r = x5_l + bar_w
+            h5   = max(int(n_nextday / max_cnt * chart_h), 1) if n_nextday else 0
+            c.create_rectangle(x5_l, PAD_TOP, x5_r, base_y, fill="#e1bee7", outline="")
+            if h5:
+                c.create_rectangle(x5_l, base_y - h5, x5_r, base_y,
+                                   fill=self._COL_NEXTDAY, outline="")
+
             # Tages-Gesamtzahl über der Gruppe
-            n_total = n_normal + n_express + n_abholung
+            n_total = n_normal + n_express + n_abholung + n_sameday + n_nextday
             if n_total:
-                max_h = max(h1, h2, h3)
-                x_mid = (x1_l + x3_r) // 2
+                max_h = max(h1, h2, h3, h4, h5)
+                x_mid = (x1_l + x5_r) // 2
                 c.create_text(x_mid, min(base_y - max_h - 3, base_y - 4),
                               text=str(n_total), anchor="s",
                               font=("Segoe UI", 7), fill="#444")
