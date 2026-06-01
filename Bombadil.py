@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.51"
+VERSION = "1.0.52"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3607,6 +3607,7 @@ class StatistikTab:
 
         self._pu_status_lbl.config(text="❌  Archiv nicht geladen – siehe Popup")
         messagebox.showwarning(title, msg)
+        self._try_save_cache_if_ready()  # auch bei Fehler: Cache mit verfügbaren Daten speichern
 
     def _pu_recalculate(self):
         try:
@@ -4155,6 +4156,7 @@ class StatistikTab:
         self._dhl_loading = False
         self._stop_loading_cb(f"❌  DHL-Fehler: {err}")
         self._dhl_status_lbl.config(text=f"❌  Fehler: {err}")
+        self._try_save_cache_if_ready()  # auch bei Fehler: Cache mit verfügbaren Daten speichern
 
     def _dhl_recalculate(self):
         try:
