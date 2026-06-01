@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.46"
+VERSION = "1.0.48"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -242,6 +242,31 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
             }), encoding="utf-8")
     except Exception:
         pass
+
+def _load_tour_barcodes_archive() -> dict:
+    """Liest alle tour_zeiten_*.json Dateien im Bombadil-Ordner.
+    Gibt {date: set_of_barcodes} zurück – für historische Rekonstruktion
+    wenn Abholer_DB-Daten fehlen (z.B. nach OrcaScan-Löschung)."""
+    from datetime import date as _date_cls
+    result = {}
+    try:
+        for p in BASE_DIR.glob("tour_zeiten_*.json"):
+            try:
+                date_str = p.stem.replace("tour_zeiten_", "")
+                d = _date_cls.fromisoformat(date_str)
+                data = _json_mod.loads(p.read_text(encoding="utf-8"))
+                bcs = set()
+                for key in ("t1_barcodes", "t2_barcodes"):
+                    for bc in (data.get(key) or []):
+                        bc = str(bc).strip()
+                        if bc:
+                            bcs.add(bc)
+                result[d] = bcs
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return result
 
 # ── Monatsziele (PU + DHL Statistik) – pro Monat individuell ───────────────
 def _goals_key(category: str) -> str:
@@ -3506,9 +3531,36 @@ class StatistikTab:
                 mask = mask & (s < end)
             return int(mask.sum())
 
+        # ── Tour-Archiv für historische Rekonstruktion ───────────────
+        # Fehlende Anlieferungen (z.B. nach OrcaScan-Löschung) werden
+        # aus den lokalen tour_zeiten_*.json Dateien ergänzt.
+        _tour_archive = _load_tour_barcodes_archive()   # {date: set_of_barcodes}
+
+        def _tour_bcs_in_range(start, end=None):
+            """Gibt alle Barcodes aus Tour-JSONs zurück, deren Datum in [start, end) liegt."""
+            result = set()
+            for d, bcs in _tour_archive.items():
+                if d >= start and (end is None or d < end):
+                    result |= bcs
+            return result
+
+        def count_anlief_in_range(start, end=None):
+            """Anlieferungen = DB-Barcodes (Verpackt_At) UNION Tour-JSON-Barcodes.
+            Verhindert Doppelzählung und ergänzt Lücken durch OrcaScan-Datenverlust."""
+            s = combined[c_verpackt_at].dt.date
+            mask = (s >= start).fillna(False)
+            if end:
+                mask = mask & (s < end).fillna(False)
+            if c_bc:
+                db_bcs = set(combined.loc[mask, c_bc].dropna().astype(str).str.strip())
+            else:
+                return int(mask.sum())   # kein Barcode-Feld → einfache Zählung
+            tour_bcs = _tour_bcs_in_range(start, end)
+            return len(db_bcs | tour_bcs)
+
         # ── Kacheln ──────────────────────────────────────────────────
-        n_aw = count_in_range(c_verpackt_at, week_start)
-        n_am = count_in_range(c_verpackt_at, month_start)
+        n_aw = count_anlief_in_range(week_start)
+        n_am = count_anlief_in_range(month_start)
         n_bw = count_in_range("_abhol_eff",  week_start)
         n_bm = count_in_range("_abhol_eff",  month_start)
 
@@ -3524,7 +3576,7 @@ class StatistikTab:
             we = ws + timedelta(days=7)
             kw = ws.isocalendar()[1]
             label = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
-            na = count_in_range(c_verpackt_at, ws, we)
+            na = count_anlief_in_range(ws, we)
             nb = count_in_range("_abhol_eff",  ws, we)
             weekly.append((label, na, nb))
 
@@ -3536,7 +3588,7 @@ class StatistikTab:
             d      = today - timedelta(days=i)
             d_next = d + timedelta(days=1)
             label  = d.strftime("%d.%m.")
-            na = count_in_range(c_verpackt_at, d, d_next)
+            na = count_anlief_in_range(d, d_next)
             nb = count_in_range("_abhol_eff",  d, d_next)
             daily.append((label, na, nb, d.weekday()))  # weekday: 0=Mo
         self._pu_daily_data = daily
@@ -3558,7 +3610,7 @@ class StatistikTab:
                 me = ms.replace(month=ms.month + 1, day=1)
             label_m = ms.strftime("%b %y")   # z.B. "Mär 26"
             key_m   = ms.strftime("%Y-%m")    # z.B. "2026-03" → für Ziele
-            na_m = count_in_range(c_verpackt_at, ms, me)
+            na_m = count_anlief_in_range(ms, me)
             nb_m = count_in_range("_abhol_eff",  ms, me)
             monthly.append((label_m, na_m, nb_m, key_m))
 
