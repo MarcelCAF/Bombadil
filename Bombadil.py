@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.52"
+VERSION = "1.0.53"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3411,10 +3411,17 @@ class StatistikTab:
         """Wird aufgerufen wenn der Cache-Download fertig ist."""
         if cache:
             self._apply_cache(cache)
-            if statistik_cache_is_fresh(cache):
-                # Cache von heute → fertig, kein weiteres Laden nötig
+            dhl_ok = bool(cache.get("dhl", {}).get("weekly"))
+            if statistik_cache_is_fresh(cache) and dhl_ok:
+                # Cache von heute UND vollständig → fertig, kein weiteres Laden nötig
                 self._pu_status_lbl.config(text="✅  Cache aktuell (heute)")
                 self._dhl_status_lbl.config(text="✅  Cache aktuell (heute)")
+                return
+            elif statistik_cache_is_fresh(cache) and not dhl_ok:
+                # Cache frisch, aber DHL-Daten fehlen (z.B. nach Timeout) → DHL nachladen
+                self._pu_status_lbl.config(text="✅  Cache aktuell (heute)")
+                self._dhl_status_lbl.config(text="⏳  DHL-Daten fehlen – lade nach …")
+                self.load_dhl_async()
                 return
             else:
                 # Veralteter Cache als Vorschau, frische Daten im Hintergrund laden
@@ -3466,9 +3473,11 @@ class StatistikTab:
             print(f"[Cache] Fehler beim Anwenden: {_e}")
 
     def _try_save_cache_if_ready(self):
-        """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind."""
+        """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind
+        UND DHL-Daten vorhanden sind (verhindert kaputten Cache bei Timeout)."""
         if not self._pu_loading and not self._dhl_loading:
-            self._save_cache_async()
+            if self._dhl_weekly_data:   # nur speichern wenn DHL-Daten vorhanden
+                self._save_cache_async()
 
     def _save_cache_async(self):
         """Speichert die aktuellen Chart-Daten als Cache auf Drive (im Hintergrund)."""
