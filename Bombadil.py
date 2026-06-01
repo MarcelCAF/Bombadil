@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.57"
+VERSION = "1.0.58"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -764,9 +764,24 @@ def backup_dhl_to_gdrive() -> dict:
 STATISTIK_CACHE_FILENAME = "statistik_cache.json"
 STATISTIK_CACHE_LOCAL    = BASE_DIR / STATISTIK_CACHE_FILENAME
 
-def load_statistik_cache() -> "dict | None":
-    """Lädt den Statistik-Cache – zuerst lokal, dann Drive als Fallback.
-    Lokal ist immer verfügbar; Drive dient als Sync für andere PCs."""
+def _read_is_master_pc() -> bool:
+    """Liest das is_master_pc-Flag aus settings.json (Default: False).
+    Nur der Master-PC (Marcel) berechnet die Statistik und lädt den Cache hoch."""
+    import json as _json
+    try:
+        if SETTINGS_FILE.exists():
+            data = _json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            return bool(data.get("is_master_pc", False))
+    except Exception:
+        pass
+    return False
+
+
+def load_statistik_cache(prefer_drive: bool = False) -> "dict | None":
+    """Lädt den Statistik-Cache.
+    prefer_drive=False (Master): lokal zuerst (schnell), Drive als Fallback.
+    prefer_drive=True (Kollegen): Drive zuerst (gemeinsame Wahrheit vom
+    Master-PC), lokal nur als Offline-Fallback."""
     import json as _json
     MIN_VERSION = 3   # ältere Caches haben anderes Tupel-Layout → verwerfen
 
@@ -774,21 +789,30 @@ def load_statistik_cache() -> "dict | None":
         return bool(data) and ("pu" in data or "dhl" in data) \
             and data.get("version", 0) >= MIN_VERSION
 
-    # 1. Lokale Datei (schnell, kein Netzwerk nötig)
-    try:
-        if STATISTIK_CACHE_LOCAL.exists():
-            data = _json.loads(STATISTIK_CACHE_LOCAL.read_text(encoding="utf-8"))
+    def _from_local():
+        try:
+            if STATISTIK_CACHE_LOCAL.exists():
+                data = _json.loads(STATISTIK_CACHE_LOCAL.read_text(encoding="utf-8"))
+                if _valid(data):
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def _from_drive():
+        try:
+            data = download_json_from_gdrive(GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
             if _valid(data):
                 return data
-    except Exception:
-        pass
-    # 2. Fallback: Drive (für andere PCs ohne lokale Datei)
-    try:
-        data = download_json_from_gdrive(GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
-        if _valid(data):
+        except Exception:
+            pass
+        return None
+
+    sources = (_from_drive, _from_local) if prefer_drive else (_from_local, _from_drive)
+    for src in sources:
+        data = src()
+        if data:
             return data
-    except Exception:
-        pass
     return None
 
 def save_statistik_cache(cache: dict):
@@ -3235,6 +3259,10 @@ class StatistikTab:
         self._start_loading_cb = start_loading or (lambda msg="Lade …": None)
         self._stop_loading_cb  = stop_loading  or (lambda msg="Bereit.": None)
 
+        # Master-PC (Marcel) berechnet die Statistik und lädt den Cache hoch.
+        # Alle anderen PCs zeigen nur den Master-Cache an (echte Synchronität).
+        self._is_master = _read_is_master_pc()
+
         # ── PU Daten ─────────────────────────────────────────────────
         self._main_df:    "pd.DataFrame | None" = None
         self._archiv_df:  "pd.DataFrame | None" = None
@@ -3555,14 +3583,20 @@ class StatistikTab:
 
     def update_main(self, df: "pd.DataFrame"):
         """Wird aufgerufen wenn die Abholer_DB neu geladen wird."""
+        # Kollegen-PCs rechnen NICHT selbst (ihre Daten sind ggf. unvollständig,
+        # z.B. ohne NAS-Zugriff). Sie holen stattdessen den frischen Master-Cache
+        # vom Drive – so sehen alle PCs exakt dasselbe.
+        if not self._is_master:
+            self.load_cache_async()
+            return
         self._main_df = df.copy() if df is not None else None
         self._pu_recalculate()
         # DHL-Statistik neu berechnen, falls DHL-Daten schon geladen sind
         # (kann vorkommen wenn Abholer_DB später fertig ist als DHL-Daten)
         if self._normal_df is not None or self._express_df is not None:
             self._dhl_recalculate()
-        # Cache nach jedem Refresh aktualisieren, damit das Handy-Dashboard
-        # tagsüber frisch bleibt (nur wenn DHL-Daten vorhanden, s. Guard).
+        # Cache nach jedem Refresh aktualisieren, damit alle PCs (und später
+        # das Handy) tagsüber frisch bleiben (nur wenn DHL-Daten vorhanden).
         self._try_save_cache_if_ready()
 
     def load_cache_async(self):
@@ -3573,14 +3607,33 @@ class StatistikTab:
         self._pu_status_lbl.config(text="⏳  Lade Cache …")
         self._dhl_status_lbl.config(text="⏳  Lade Cache …")
 
+        # Kollegen holen den Cache vom Drive (gemeinsame Wahrheit vom Master).
+        prefer_drive = not self._is_master
+
         def _worker():
-            cache = load_statistik_cache()
+            cache = load_statistik_cache(prefer_drive=prefer_drive)
             self.frame.after(0, lambda c=cache: self._on_cache_loaded(c))
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_cache_loaded(self, cache):
         """Wird aufgerufen wenn der Cache-Download fertig ist."""
+        # ── Kollegen-PCs (nicht Master): NUR den Master-Cache anzeigen ──
+        # Keine eigene Berechnung, kein Upload → alle PCs zeigen dasselbe.
+        if not self._is_master:
+            if cache:
+                self._apply_cache(cache)
+                stand = cache.get("erstellt", "?")
+                hinweis = f"📡  Stand von QUAL-Marcel: {stand}"
+                self._pu_status_lbl.config(text=hinweis)
+                self._dhl_status_lbl.config(text=hinweis)
+            else:
+                hinweis = "⏳  Warte auf Daten von QUAL-Marcel …"
+                self._pu_status_lbl.config(text=hinweis)
+                self._dhl_status_lbl.config(text=hinweis)
+            return
+
+        # ── Master-PC: Cache anzeigen + bei Bedarf frisch berechnen ──
         if cache:
             self._apply_cache(cache)
             dhl_ok = bool(cache.get("dhl", {}).get("weekly"))
@@ -3648,7 +3701,11 @@ class StatistikTab:
 
     def _try_save_cache_if_ready(self):
         """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind
-        UND DHL-Daten vorhanden sind (verhindert kaputten Cache bei Timeout)."""
+        UND DHL-Daten vorhanden sind (verhindert kaputten Cache bei Timeout).
+        NUR der Master-PC lädt hoch – sonst könnten Kollegen-PCs (z.B. ohne
+        NAS) mit unvollständigen Daten den gemeinsamen Cache überschreiben."""
+        if not self._is_master:
+            return
         if not self._pu_loading and not self._dhl_loading:
             if self._dhl_weekly_data:   # nur speichern wenn DHL-Daten vorhanden
                 self._save_cache_async()
