@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.45"
+VERSION = "1.0.46"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -486,15 +486,31 @@ def write_excel_text_cols(df: pd.DataFrame, out_path: Path, text_cols: list[str]
 
 
 def backup_abholer_db() -> Path:
-    """Lädt die komplette Abholer_DB und speichert sie als Excel-Backup
-    im festen Archiv-Ordner auf dem NAS (BACKUP_DIR). So gehen Backups
-    von allen Bombadil-PCs in den selben zentralen Ordner."""
+    """Lädt die komplette Abholer_DB und speichert sie:
+    1. Als Excel auf dem NAS (BACKUP_DIR) – primäres Backup
+    2. Auf Google Drive (GDRIVE_FOLDER_ABHOLER) – Fallback für PU-Statistik
+    So bleibt die PU-Statistik vollständig auch wenn OrcaScan-Daten gelöscht werden."""
     today = date.today().strftime("%Y-%m-%d")
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = BACKUP_DIR / f"Abholer_DB_Backup_{today}.xlsx"
+    filename = f"Abholer_DB_Backup_{today}.xlsx"
     df = fetch_abholer_orca()
-    write_excel_text_cols(df, out_path, text_cols=list(df.columns))
-    return out_path
+
+    # ── 1. NAS-Backup ─────────────────────────────────────────────────────
+    nas_path = None
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        nas_path = BACKUP_DIR / filename
+        write_excel_text_cols(df, nas_path, text_cols=list(df.columns))
+    except Exception:
+        pass
+
+    # ── 2. Google Drive Backup ────────────────────────────────────────────
+    try:
+        _delete_drive_files_by_name(filename, GDRIVE_FOLDER_ABHOLER)
+        upload_excel_to_gdrive(df, GDRIVE_FOLDER_ABHOLER, filename)
+    except Exception:
+        pass   # Drive-Fehler ist nicht kritisch – NAS-Backup bleibt primär
+
+    return nas_path or (BACKUP_DIR / filename)
 
 
 def _fetch_single_archiv_gdrive(filename: str, folder_id: str) -> "pd.DataFrame | None":
@@ -2879,20 +2895,24 @@ def fetch_archiv_gdrive() -> "pd.DataFrame":
 
     service = _get_oauth_drive_service()
 
-    results = service.files().list(
-        q=(
-            f"'{GDRIVE_ABHOLER_FOLDER_ID}' in parents "
-            f"and name contains 'Abholer_DB_Archiv' "
-            f"and trashed = false"
-        ),
-        fields="files(id, name, mimeType)",
-        orderBy="modifiedTime desc",
-        pageSize=500,
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-
-    files = results.get("files", [])
+    # Beide Datei-Typen laden:
+    # - Abholer_DB_Archiv_* → Cleanup-Archive (Pakete die aus OrcaScan entfernt wurden)
+    # - Abholer_DB_Backup_* → Tägliche Snapshots (seit v1.0.46, Fallback bei DB-Löschung)
+    files = []
+    for pattern in ("Abholer_DB_Archiv", "Abholer_DB_Backup"):
+        res = service.files().list(
+            q=(
+                f"'{GDRIVE_FOLDER_ABHOLER}' in parents "
+                f"and name contains '{pattern}' "
+                f"and trashed = false"
+            ),
+            fields="files(id, name, mimeType)",
+            orderBy="modifiedTime desc",
+            pageSize=500,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files.extend(res.get("files", []))
     if not files:
         return pd.DataFrame()
 
