@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.44"
+VERSION = "1.0.45"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8229,7 +8229,7 @@ class App(tk.Tk):
         self.export_folder = Path(defaults["export_folder"])
         self.last_backup_date = defaults.get("last_backup_date", "")
         self.tourlisten_folder_id = defaults.get("tourlisten_folder_id", "")
-        # Master-PC-Flag: nur dieser PC macht automatische Backups (20:00).
+        # Master-PC-Flag: nur dieser PC macht automatische Backups (17:00).
         # Marcel setzt in seiner settings.json "is_master_pc": true.
         # Andere Kollegen lassen es auf false (Default).
         self.is_master_pc = bool(defaults.get("is_master_pc", False))
@@ -8273,7 +8273,7 @@ class App(tk.Tk):
 
     # ── Backup ────────────────────────────────────────────────────────────
 
-    _BACKUP_HOUR = 20  # 20:00 Uhr
+    _BACKUP_HOUR = 17  # 17:00 Uhr
 
     def _schedule_backup_check(self):
         # Nur Master-PC macht automatische Backups (verhindert Mehrfach-
