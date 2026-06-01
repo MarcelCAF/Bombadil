@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.50"
+VERSION = "1.0.51"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -347,6 +347,7 @@ GDRIVE_FOLDER_DHL_NORMAL = "1G5_i9zUvjqVBCnE_ME-fPkhK4j5SPWpe"   # Ordner: DHL (
 GDRIVE_FOLDER_DHL_EXPRESS= "1J_oZcBmPECYfL7xj5U0oxgao--sdzS_c"   # Ordner: EXPRESS
 GDRIVE_FOLDER_TAGESBOTE  = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Ordner: Tagesbote Upload
 GDRIVE_FOLDER_TOUR_ZEITEN= "1ALz0IR6JeoUVXFMAMxida4MT7lQ0ArDd"    # Ordner: Tourlisten
+GDRIVE_FOLDER_CLOUDDATEN = "1WsNmFk7MordAuTFXPeb_UEMRnd206DUt"    # Ordner: Clouddaten (Cache)
 # Rückwärts-Kompatibilität (alte Namen als Aliase – damit nichts bricht)
 GDRIVE_ABHOLER_FOLDER_ID = GDRIVE_FOLDER_ABHOLER
 GDRIVE_FOLDER_ID         = GDRIVE_FOLDER_TAGESBOTE
@@ -620,6 +621,63 @@ def backup_dhl_to_gdrive() -> dict:
         except Exception as e:
             results[key] = f"Upload-Fehler: {e}"
     return results
+
+
+STATISTIK_CACHE_FILENAME = "statistik_cache.json"
+
+def load_statistik_cache() -> "dict | None":
+    """Lädt den Statistik-Cache aus dem Drive-Ordner 'Clouddaten'.
+    Gibt None zurück wenn nicht vorhanden oder fehlerhaft."""
+    try:
+        data = download_json_from_gdrive(GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
+        if not data or "tage" not in data:
+            return None
+        return data
+    except Exception:
+        return None
+
+def save_statistik_cache(cache: dict):
+    """Speichert den Statistik-Cache als JSON in Drive-Ordner 'Clouddaten'."""
+    try:
+        upload_json_to_gdrive(cache, GDRIVE_FOLDER_CLOUDDATEN, STATISTIK_CACHE_FILENAME)
+    except Exception:
+        pass
+
+def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
+                          dhl_weekly, dhl_daily, dhl_monthly,
+                          pu_tiles: dict, dhl_tiles: dict) -> dict:
+    """Baut den Cache aus den bereits berechneten Chart-Daten.
+    Format ist direkt wiederverwendbar – kein erneutes Rechnen nötig."""
+    import datetime as _dt
+
+    def _ser(rows):
+        """Konvertiert Tupel-Listen in serialisierbare Listen."""
+        return [list(r) for r in rows] if rows else []
+
+    return {
+        "version":   2,
+        "erstellt":  _dt.date.today().isoformat(),
+        "pu": {
+            "weekly":  _ser(pu_weekly),
+            "daily":   _ser(pu_daily),
+            "monthly": _ser(pu_monthly),
+            "tiles":   pu_tiles,
+        },
+        "dhl": {
+            "weekly":  _ser(dhl_weekly),
+            "daily":   _ser(dhl_daily),
+            "monthly": _ser(dhl_monthly),
+            "tiles":   dhl_tiles,
+        },
+    }
+
+def statistik_cache_is_fresh(cache: dict) -> bool:
+    """Gibt True zurück wenn der Cache von heute ist."""
+    import datetime as _dt
+    try:
+        return cache.get("erstellt") == _dt.date.today().isoformat()
+    except Exception:
+        return False
 
 
 def fetch_dhl_archiv_gdrive() -> tuple:
@@ -3335,6 +3393,112 @@ class StatistikTab:
         if self._normal_df is not None or self._express_df is not None:
             self._dhl_recalculate()
 
+    def load_cache_async(self):
+        """Versucht beim Start den Statistik-Cache aus Drive zu laden.
+        Wenn der Cache von heute ist → sofort anzeigen, kein weiteres Laden nötig.
+        Wenn der Cache veraltet ist → trotzdem anzeigen (als Vorschau), dann
+        im Hintergrund frische Daten nachladen."""
+        self._pu_status_lbl.config(text="⏳  Lade Cache …")
+        self._dhl_status_lbl.config(text="⏳  Lade Cache …")
+
+        def _worker():
+            cache = load_statistik_cache()
+            self.frame.after(0, lambda c=cache: self._on_cache_loaded(c))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_cache_loaded(self, cache):
+        """Wird aufgerufen wenn der Cache-Download fertig ist."""
+        if cache:
+            self._apply_cache(cache)
+            if statistik_cache_is_fresh(cache):
+                # Cache von heute → fertig, kein weiteres Laden nötig
+                self._pu_status_lbl.config(text="✅  Cache aktuell (heute)")
+                self._dhl_status_lbl.config(text="✅  Cache aktuell (heute)")
+                return
+            else:
+                # Veralteter Cache als Vorschau, frische Daten im Hintergrund laden
+                self._pu_status_lbl.config(text="⏳  Cache veraltet – lade frische Daten …")
+                self._dhl_status_lbl.config(text="⏳  Cache veraltet – lade frische Daten …")
+        else:
+            self._pu_status_lbl.config(text="⏳  Kein Cache – lade Archiv …")
+        # Frische Daten nachladen
+        self.load_archive_async()
+        self.load_dhl_async()
+
+    def _apply_cache(self, cache: dict):
+        """Zeigt Statistik sofort aus Cache an – ohne auf OrcaScan zu warten."""
+        try:
+            pu  = cache.get("pu",  {})
+            dhl = cache.get("dhl", {})
+
+            # PU-Chart befüllen
+            if pu.get("weekly"):
+                self._pu_weekly_data  = [tuple(r) for r in pu["weekly"]]
+            if pu.get("daily"):
+                self._pu_daily_data   = [tuple(r) for r in pu["daily"]]
+            if pu.get("monthly"):
+                self._pu_monthly_data = [tuple(r) for r in pu["monthly"]]
+            tiles_pu = pu.get("tiles", {})
+            if tiles_pu:
+                self._lbl_anlief_woche.config(text=str(tiles_pu.get("anlief_woche", "–")))
+                self._lbl_anlief_monat.config(text=str(tiles_pu.get("anlief_monat", "–")))
+                self._lbl_abhol_woche.config( text=str(tiles_pu.get("abhol_woche",  "–")))
+                self._lbl_abhol_monat.config( text=str(tiles_pu.get("abhol_monat",  "–")))
+            self._pu_redraw_chart()
+
+            # DHL-Chart befüllen
+            if dhl.get("weekly"):
+                self._dhl_weekly_data  = [tuple(r) for r in dhl["weekly"]]
+            if dhl.get("daily"):
+                self._dhl_daily_data   = [tuple(r) for r in dhl["daily"]]
+            if dhl.get("monthly"):
+                self._dhl_monthly_data = [tuple(r) for r in dhl["monthly"]]
+            tiles_dhl = dhl.get("tiles", {})
+            if tiles_dhl:
+                self._lbl_gesamt_woche.config(  text=str(tiles_dhl.get("gesamt_woche",  "–")))
+                self._lbl_gesamt_monat.config(  text=str(tiles_dhl.get("gesamt_monat",  "–")))
+                self._lbl_normal_woche.config(  text=str(tiles_dhl.get("normal_woche",  "–")))
+                self._lbl_express_woche.config( text=str(tiles_dhl.get("express_woche", "–")))
+                self._lbl_abholung_woche.config(text=str(tiles_dhl.get("pickup_woche",  "–")))
+            self._dhl_redraw_chart()
+        except Exception as _e:
+            print(f"[Cache] Fehler beim Anwenden: {_e}")
+
+    def _try_save_cache_if_ready(self):
+        """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind."""
+        if not self._pu_loading and not self._dhl_loading:
+            self._save_cache_async()
+
+    def _save_cache_async(self):
+        """Speichert die aktuellen Chart-Daten als Cache auf Drive (im Hintergrund)."""
+        # Tile-Werte auslesen
+        def _txt(lbl):
+            try: return lbl.cget("text")
+            except Exception: return "–"
+
+        pu_tiles  = {
+            "anlief_woche": _txt(self._lbl_anlief_woche),
+            "anlief_monat": _txt(self._lbl_anlief_monat),
+            "abhol_woche":  _txt(self._lbl_abhol_woche),
+            "abhol_monat":  _txt(self._lbl_abhol_monat),
+        }
+        dhl_tiles = {
+            "gesamt_woche":  _txt(self._lbl_gesamt_woche),
+            "gesamt_monat":  _txt(self._lbl_gesamt_monat),
+            "normal_woche":  _txt(self._lbl_normal_woche),
+            "express_woche": _txt(self._lbl_express_woche),
+            "pickup_woche":  _txt(self._lbl_abholung_woche),
+        }
+        cache = build_statistik_cache(
+            self._pu_weekly_data,  self._pu_daily_data,  self._pu_monthly_data,
+            self._dhl_weekly_data, self._dhl_daily_data, self._dhl_monthly_data,
+            pu_tiles, dhl_tiles,
+        )
+        def _worker():
+            save_statistik_cache(cache)
+        threading.Thread(target=_worker, daemon=True).start()
+
     def load_archive_async(self):
         """Startet das Laden der Archiv-Dateien im Hintergrund (einmalig beim Start)."""
         if self._pu_loading:
@@ -3404,6 +3568,7 @@ class StatistikTab:
         self._pu_status_lbl.config(text=f"✅  {n} archivierte Einträge geladen")
         self._stop_loading_cb(f"PU-Archiv geladen: {n} Einträge")
         self._pu_recalculate()
+        self._try_save_cache_if_ready()
 
     def _pu_on_archive_error(self, err: Exception):
         self._pu_loading = False
@@ -3984,6 +4149,7 @@ class StatistikTab:
         self._dhl_status_lbl.config(text=f"✅  {n_n} DHL Normal + {n_e} DHL Express geladen")
         self._stop_loading_cb(f"DHL geladen: {n_n} Normal + {n_e} Express")
         self._dhl_recalculate()
+        self._try_save_cache_if_ready()
 
     def _dhl_on_error(self, err):
         self._dhl_loading = False
@@ -7113,8 +7279,7 @@ class App(tk.Tk):
         self.after(400,    self.load_dhl_orca)
         self.after(600,    self.toggle_refresh)
         self.after(800,    self.toggle_dhl_refresh)
-        self.after(3_000,  self.tab_statistik.load_archive_async)  # Archiv nach Hauptladen
-        self.after(5_000,  self.tab_statistik.load_dhl_async)      # DHL Statistik
+        self.after(3_000,  self.tab_statistik.load_cache_async)     # Cache zuerst, dann frische Daten
         self.after(60_000, self._check_stale)  # Stale-Data Indikator starten
 
     # ------------------------------------------------------------------ helpers
