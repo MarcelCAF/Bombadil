@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.63"
+VERSION = "1.0.64"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -848,7 +848,8 @@ def save_statistik_cache(cache: dict):
 
 def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
                           dhl_weekly, dhl_daily, dhl_monthly,
-                          pu_tiles: dict, dhl_tiles: dict) -> dict:
+                          pu_tiles: dict, dhl_tiles: dict,
+                          heute: dict = None) -> dict:
     """Baut den Cache aus den bereits berechneten Chart-Daten.
     Format ist direkt wiederverwendbar – kein erneutes Rechnen nötig."""
     import datetime as _dt
@@ -860,6 +861,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
     return {
         "version":   5,
         "erstellt":  _dt.date.today().isoformat(),
+        "heute":     heute or {},
         "pu": {
             "weekly":  _ser(pu_weekly),
             "daily":   _ser(pu_daily),
@@ -3306,9 +3308,13 @@ class StatistikTab:
     _COL_NEXTDAY  = "#6a1b9a"   # lila  – Next day delivery
     _COL_BG       = "#f0f2f5"
 
-    def __init__(self, parent, start_loading=None, stop_loading=None):
+    def __init__(self, parent, start_loading=None, stop_loading=None,
+                 get_heute=None):
         self._start_loading_cb = start_loading or (lambda msg="Lade …": None)
         self._stop_loading_cb  = stop_loading  or (lambda msg="Bereit.": None)
+        # Callback: liefert aktuelle Tages-Zahlen für den Cache
+        # (z.B. lambda: {"pakete": 604, "pu": 114, "normal": 326, "express": 628})
+        self._get_heute_cb = get_heute or (lambda: {})
 
         # Master-PC (Marcel) berechnet die Statistik und lädt den Cache hoch.
         # Alle anderen PCs zeigen nur den Master-Cache an (echte Synchronität).
@@ -3783,10 +3789,11 @@ class StatistikTab:
             "sameday_woche": _txt(self._lbl_sameday_woche),
             "nextday_woche": _txt(self._lbl_nextday_woche),
         }
+        heute = self._get_heute_cb()
         cache = build_statistik_cache(
             self._pu_weekly_data,  self._pu_daily_data,  self._pu_monthly_data,
             self._dhl_weekly_data, self._dhl_daily_data, self._dhl_monthly_data,
-            pu_tiles, dhl_tiles,
+            pu_tiles, dhl_tiles, heute=heute,
         )
         def _worker():
             save_statistik_cache(cache)
@@ -7265,6 +7272,12 @@ class App(tk.Tk):
             self.nb,
             start_loading=self._start_loading,
             stop_loading=self._stop_loading,
+            get_heute=lambda: {
+                "pakete":  self._n_dhl_heute + self._n_dhl_express + self._n_pu_heute,
+                "pu":      self._n_pu_heute,
+                "normal":  self._n_dhl_heute,
+                "express": self._n_dhl_express,
+            },
         )
         self.nb.add(self.tab_statistik.frame, text="  Statistik  ")
 
