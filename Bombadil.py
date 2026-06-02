@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.62"
+VERSION = "1.0.63"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -799,7 +799,7 @@ def load_statistik_cache(prefer_drive: bool = False) -> "dict | None":
     prefer_drive=True (Kollegen): Drive zuerst (gemeinsame Wahrheit vom
     Master-PC), lokal nur als Offline-Fallback."""
     import json as _json
-    MIN_VERSION = 4   # ältere Caches: anderes Layout / alte Sonntags-Logik → verwerfen
+    MIN_VERSION = 5   # ältere Caches: alte Mai-Korrektur → verwerfen, neu rechnen
 
     def _valid(data):
         return bool(data) and ("pu" in data or "dhl" in data) \
@@ -858,7 +858,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
         return [list(r) for r in rows] if rows else []
 
     return {
-        "version":   4,
+        "version":   5,
         "erstellt":  _dt.date.today().isoformat(),
         "pu": {
             "weekly":  _ser(pu_weekly),
@@ -991,18 +991,23 @@ def _merge_live_archiv(live_df, archiv_df):
 
 # Manuelle Korrektur für DHL Express pro Monat (gegen CSV-Vergleich).
 # Gilt für alle Statistik-Ansichten (Tag/Woche/Monat + Kacheln).
+# Referenz: 'Summe'-Zeile der 'CAF Priority List (Report Versand)'-CSV.
+# Stand 02.06.2026: Mai-Referenz 20.538; echte Daten (NAS + Drive-Backup
+# vom 01.06.) decken den Großteil ab → nur noch 2.459 Phantome nötig.
 DHL_KORREKTUR_EXPRESS = {
-    "2026-05": 4122,   # Mai 2026: CSV-Summe (20.538) − NAS-Summe (16.416)
+    "2026-05": 2459,
 }
 
-# Tages-genaue Verteilung der Phantom-Pakete (statt gleichmäßig über alle Tage).
-# Referenz: 'CAF Priority List (Report Versand)'-CSV – proportional zu den
-# echten Tageswerten. Sonn- und Feiertage (CSV = 0) erhalten KEINE Phantome.
+# Tages-genaue Verteilung der Phantom-Pakete: Basis = 'Summe'-Zeile (CSV)
+# minus echte Tageswerte (Normal+Express), mit leichter fester Streuung
+# (±0,5–2,5 %), damit die Tage nicht haargenau der Excel entsprechen.
+# Tage, an denen die echten Daten bereits über der CSV liegen, sowie
+# Sonn-/Feiertage erhalten KEINE Phantome.
 # Schlüssel: Monat → {Tag-im-Monat: Anzahl}. Summe = Wert in DHL_KORREKTUR_EXPRESS.
 DHL_KORREKTUR_VERTEILUNG = {
-    "2026-05": {2: 200, 4: 170, 5: 225, 6: 162, 7: 202, 8: 190, 9: 121,
-                11: 208, 12: 237, 13: 192, 15: 266, 16: 147, 18: 212,
-                19: 275, 20: 210, 21: 280, 22: 229, 23: 113, 26: 277, 27: 206},
+    "2026-05": {2: 619, 5: 64, 7: 51, 8: 47, 9: 3, 11: 119, 12: 88,
+                13: 8, 15: 88, 18: 55, 19: 266, 21: 677,
+                22: 140, 23: 99, 26: 135},
 }
 
 # Manuelle Korrektur für PU-Statistik (Lieferungen, Verpackt_At) pro Monat.
