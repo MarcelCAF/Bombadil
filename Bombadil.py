@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.64"
+VERSION = "1.0.65"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8497,6 +8497,8 @@ class App(tk.Tk):
     def _on_pu_count_change(self, n: int):
         """Wird von PickupHeuteTab aufgerufen wenn Daten geladen werden → Kachel aktualisieren."""
         self._n_pu_heute = n
+        # Cache neu speichern damit PU-Heute-Zahl im Mobile-Dashboard stimmt
+        self.tab_statistik._try_save_cache_if_ready()
         if "pickup_heute" not in self._tile_lbls:
             return
         tile_data = self._tile_lbls["pickup_heute"]
