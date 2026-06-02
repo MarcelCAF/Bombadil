@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.66"
+VERSION = "1.0.67"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -6606,14 +6606,23 @@ class PickupHeuteTab:
             return
 
         n_gesamt       = len(rows)
-        if self.on_count_change:
-            self.on_count_change(n_gesamt)
         n_abholbereit  = sum(1 for r in rows if r["_abholbereit_bool"]
                              or r.get("db_status") == "abgeholt")
-        n_verpackt     = sum(1 for r in rows if r["tb_status"].lower() == "verpackt"
+        n_verpackt_tmp = sum(1 for r in rows if r["tb_status"].lower() == "verpackt"
                              and not r["_abholbereit_bool"]
                              and r.get("db_status") != "abgeholt")
-        n_offen        = sum(1 for r in rows if r["tb_status"].lower() == "offen")
+        n_offen_tmp    = sum(1 for r in rows if r["tb_status"].lower() == "offen")
+        n_abgeholt_tmp = sum(1 for r in rows if r.get("db_status") == "abgeholt")
+        if self.on_count_change:
+            self.on_count_change(n_gesamt, {
+                "offen":       n_offen_tmp,
+                "verpackt":    n_verpackt_tmp,
+                "abholbereit": n_abholbereit - n_abgeholt_tmp,
+                "abgeholt":    n_abgeholt_tmp,
+            })
+        n_abholbereit  = n_abholbereit_tmp
+        n_verpackt     = n_verpackt_tmp
+        n_offen        = n_offen_tmp
         n_t1           = sum(1 for r in rows if r.get("tour") == "T1")
         n_t2           = sum(1 for r in rows if r.get("tour") == "T2")
         _parts = [f"🚐 Tour 1: {n_t1}  Tour 2: {n_t2}",
@@ -6928,6 +6937,7 @@ class App(tk.Tk):
         self._n_dhl_heute    = 0   # DHL Normal für "Pakete heute"-Kachel
         self._n_dhl_express  = 0   # DHL Express für "Pakete heute"-Kachel
         self._n_pu_heute     = 0   # PU heute für "Pakete heute"-Kachel
+        self._pu_heute_detail = {}  # PU-Aufschlüsselung für Mobile-Dashboard
         self._n_pu_verpackt  = 0   # Davon Verpackt (PU) für Prozentanzeige
         self._last_load_time = 0.0 # Zeitpunkt letzter erfolgreicher Abholer_DB-Laden
         self._load_settings()   # export_folder aus settings.json laden
@@ -7274,10 +7284,11 @@ class App(tk.Tk):
             start_loading=self._start_loading,
             stop_loading=self._stop_loading,
             get_heute=lambda: {
-                "pakete":  self._n_dhl_heute + self._n_dhl_express + self._n_pu_heute,
-                "pu":      self._n_pu_heute,
-                "normal":  self._n_dhl_heute,
-                "express": self._n_dhl_express,
+                "pakete":      self._n_dhl_heute + self._n_dhl_express + self._n_pu_heute,
+                "pu":          self._n_pu_heute,
+                "normal":      self._n_dhl_heute,
+                "express":     self._n_dhl_express,
+                "pu_detail":   self._pu_heute_detail,
             },
         )
         self.nb.add(self.tab_statistik.frame, text="  Statistik  ")
@@ -8495,9 +8506,10 @@ class App(tk.Tk):
         if old_val != str(total):
             self._flash_tile(count_lbl)
 
-    def _on_pu_count_change(self, n: int):
+    def _on_pu_count_change(self, n: int, detail: dict = None):
         """Wird von PickupHeuteTab aufgerufen wenn Daten geladen werden → Kachel aktualisieren."""
-        self._n_pu_heute = n
+        self._n_pu_heute        = n
+        self._pu_heute_detail   = detail or {}   # {"offen", "verpackt", "abholbereit", "abgeholt"}
         # Cache neu speichern damit PU-Heute-Zahl im Mobile-Dashboard stimmt
         self.tab_statistik._try_save_cache_if_ready()
         if "pickup_heute" not in self._tile_lbls:
