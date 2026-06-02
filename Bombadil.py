@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.67"
+VERSION = "1.0.68"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -6620,7 +6620,6 @@ class PickupHeuteTab:
                 "abholbereit": n_abholbereit - n_abgeholt_tmp,
                 "abgeholt":    n_abgeholt_tmp,
             })
-        n_abholbereit  = n_abholbereit_tmp
         n_verpackt     = n_verpackt_tmp
         n_offen        = n_offen_tmp
         n_t1           = sum(1 for r in rows if r.get("tour") == "T1")
