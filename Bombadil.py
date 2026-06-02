@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.65"
+VERSION = "1.0.66"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -861,6 +861,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
     return {
         "version":   5,
         "erstellt":  _dt.date.today().isoformat(),
+        "uhrzeit":   _dt.datetime.now().strftime("%H:%M"),
         "heute":     heute or {},
         "pu": {
             "weekly":  _ser(pu_weekly),
