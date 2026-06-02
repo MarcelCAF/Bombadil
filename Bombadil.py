@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.58"
+VERSION = "1.0.59"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -1829,6 +1829,11 @@ def fetch_abholer_orca() -> "pd.DataFrame":
                     f"OrcaScan API Fehler (Seite {page}): HTTP Error {e.code}: {e.reason}"
                 ) from e
             except Exception as e:
+                # Netzwerk-Timeout o.ä. → bis zu 3× automatisch erneut versuchen,
+                # erst beim letzten Fehlschlag eine Meldung auslösen.
+                if attempt < 3:
+                    _time.sleep((attempt + 1) * 5)
+                    continue
                 raise RuntimeError(f"OrcaScan API Fehler (Seite {page}): {e}") from e
 
         rows = data.get("data", [])
@@ -1882,6 +1887,11 @@ def fetch_sheet_orca(sheet_id: str, drop_cols: set = None) -> "pd.DataFrame":
                 f"OrcaScan API Fehler (Sheet {sheet_id}): HTTP {e.code}: {e.reason}"
             ) from e
         except Exception as e:
+            # Netzwerk-Timeout o.ä. → bis zu 3× automatisch erneut versuchen,
+            # erst beim letzten Fehlschlag eine Meldung auslösen.
+            if attempt < 3:
+                _time.sleep((attempt + 1) * 5)
+                continue
             raise RuntimeError(f"OrcaScan API Fehler (Sheet {sheet_id}): {e}") from e
 
     all_rows = data.get("data", [])
