@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.61"
+VERSION = "1.0.62"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -666,13 +666,16 @@ def _apply_ts_cache(df: "pd.DataFrame") -> "pd.DataFrame":
                        current.__class__.__name__ == "NaTType") or
                       (isinstance(current, float) and str(current) == "nan"))
         if is_missing:
-            df.at[idx, ab_col] = cached_ts
+            # String statt Timestamp zuweisen – neuere pandas-Versionen
+            # verbieten Timestamp-Werte in str-Spalten ("Invalid value for
+            # dtype 'str'"). Die Spalte wird später per to_datetime geparst.
+            df.at[idx, ab_col] = cached_str
             continue
         # Zu neuer Timestamp → Cache-Wert ist älter → Cache gewinnt
         try:
             current_ts = _pd.Timestamp(current)
             if cached_ts < current_ts:
-                df.at[idx, ab_col] = cached_ts
+                df.at[idx, ab_col] = cached_str
         except Exception:
             pass
     return df
@@ -796,7 +799,7 @@ def load_statistik_cache(prefer_drive: bool = False) -> "dict | None":
     prefer_drive=True (Kollegen): Drive zuerst (gemeinsame Wahrheit vom
     Master-PC), lokal nur als Offline-Fallback."""
     import json as _json
-    MIN_VERSION = 3   # ältere Caches haben anderes Tupel-Layout → verwerfen
+    MIN_VERSION = 4   # ältere Caches: anderes Layout / alte Sonntags-Logik → verwerfen
 
     def _valid(data):
         return bool(data) and ("pu" in data or "dhl" in data) \
@@ -855,7 +858,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
         return [list(r) for r in rows] if rows else []
 
     return {
-        "version":   3,
+        "version":   4,
         "erstellt":  _dt.date.today().isoformat(),
         "pu": {
             "weekly":  _ser(pu_weekly),
@@ -987,10 +990,19 @@ def _merge_live_archiv(live_df, archiv_df):
 
 
 # Manuelle Korrektur für DHL Express pro Monat (gegen CSV-Vergleich).
-# Wird über alle Tage des Monats gleichmäßig verteilt und gilt für alle
-# Statistik-Ansichten (Tag/Woche/Monat + Kacheln).
+# Gilt für alle Statistik-Ansichten (Tag/Woche/Monat + Kacheln).
 DHL_KORREKTUR_EXPRESS = {
     "2026-05": 4122,   # Mai 2026: CSV-Summe (20.538) − NAS-Summe (16.416)
+}
+
+# Tages-genaue Verteilung der Phantom-Pakete (statt gleichmäßig über alle Tage).
+# Referenz: 'CAF Priority List (Report Versand)'-CSV – proportional zu den
+# echten Tageswerten. Sonn- und Feiertage (CSV = 0) erhalten KEINE Phantome.
+# Schlüssel: Monat → {Tag-im-Monat: Anzahl}. Summe = Wert in DHL_KORREKTUR_EXPRESS.
+DHL_KORREKTUR_VERTEILUNG = {
+    "2026-05": {2: 200, 4: 170, 5: 225, 6: 162, 7: 202, 8: 190, 9: 121,
+                11: 208, 12: 237, 13: 192, 15: 266, 16: 147, 18: 212,
+                19: 275, 20: 210, 21: 280, 22: 229, 23: 113, 26: 277, 27: 206},
 }
 
 # Manuelle Korrektur für PU-Statistik (Lieferungen, Verpackt_At) pro Monat.
@@ -1003,8 +1015,12 @@ PU_KORREKTUR_VERPACKT = {
 
 def apply_dhl_express_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
     """Fügt Phantom-Pakete für Monate ein, die in den NAS-Archiven zu wenig
-    Daten haben (Vergleich gegen CSV 'CAF Priority List'). Die Phantom-
-    Pakete werden gleichmäßig über alle Tage des Monats verteilt."""
+    Daten haben (Vergleich gegen CSV 'CAF Priority List').
+
+    Verteilung: Wenn für den Monat eine Tages-Verteilung in
+    DHL_KORREKTUR_VERTEILUNG hinterlegt ist (aus den echten CSV-Tageswerten),
+    wird diese genutzt – keine Phantome an Sonn-/Feiertagen.
+    Sonst Fallback: gleichmäßig über alle Tage des Monats."""
     if df is None or not DHL_KORREKTUR_EXPRESS:
         return df
     import calendar
@@ -1017,13 +1033,20 @@ def apply_dhl_express_korrektur(df: "pd.DataFrame") -> "pd.DataFrame":
             continue
         if int(count) <= 0:
             continue
-        days = calendar.monthrange(year, month)[1]
-        per_day, rest = divmod(int(count), days)
-        for d in range(1, days + 1):
-            n = per_day + (1 if d <= rest else 0)
+
+        # Tages-Verteilung bestimmen: {Tag: Anzahl}
+        verteilung = DHL_KORREKTUR_VERTEILUNG.get(ym_str)
+        if not verteilung:
+            # Fallback: gleichmäßig über alle Tage
+            days = calendar.monthrange(year, month)[1]
+            per_day, rest = divmod(int(count), days)
+            verteilung = {d: per_day + (1 if d <= rest else 0)
+                          for d in range(1, days + 1)}
+
+        for d, n in verteilung.items():
             if n <= 0:
                 continue
-            ts = _dt(year, month, d, 12, 0)
+            ts = _dt(year, month, int(d), 12, 0)
             for i in range(n):
                 rows.append({
                     "Package Barcode": f"KORR_{ym_str}_{d:02d}_{i:04d}",
