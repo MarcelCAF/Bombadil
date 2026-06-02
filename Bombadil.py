@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.59"
+VERSION = "1.0.60"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -231,7 +231,17 @@ def _load_tour_zeiten() -> dict:
         pass
     return {"t1": None, "t2": None}
 
-def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
+def _pc_name() -> str:
+    """Name dieses PCs – wird beim Tour-Stempeln mitgespeichert (Nachvollziehbarkeit)."""
+    import platform
+    try:
+        return platform.node() or "?"
+    except Exception:
+        return "?"
+
+
+def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None,
+                      t1_set_by=None, t2_set_by=None):
     try:
         tz = _load_tour_zeiten()
         _tour_zeiten_pfad().write_text(
@@ -239,6 +249,9 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None):
                 "t1": t1, "t2": t2,
                 "t1_barcodes": t1_barcodes if t1_barcodes is not None else tz.get("t1_barcodes", []),
                 "t2_barcodes": t2_barcodes if t2_barcodes is not None else tz.get("t2_barcodes", []),
+                # Wer hat gestempelt? (PC-Name, seit v1.0.60)
+                "t1_set_by": t1_set_by if t1_set_by is not None else tz.get("t1_set_by"),
+                "t2_set_by": t2_set_by if t2_set_by is not None else tz.get("t2_set_by"),
             }), encoding="utf-8")
     except Exception:
         pass
@@ -6196,7 +6209,8 @@ class PickupHeuteTab:
         if netz.get("t1"):
             # anderer PC war schneller – dessen Daten uebernehmen
             _save_tour_zeiten(netz.get("t1"), netz.get("t2"),
-                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []))
+                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []),
+                              netz.get("t1_set_by"), netz.get("t2_set_by"))
             self._restore_tour_buttons()
             self._recompute_tours_local()
             return
@@ -6205,7 +6219,19 @@ class PickupHeuteTab:
             return
         jetzt = (_dt.datetime.now()).strftime("%H:%M")
         t1_barcodes = [r["barcode"] for r in self._all_rows if r["tb_status"] == "Verpackt"]
-        _save_tour_zeiten(t1=jetzt, t2=tz.get("t2"), t1_barcodes=t1_barcodes)
+        # ── Sicherheitsabfrage (verhindert versehentliches Stempeln) ──────
+        n = len(t1_barcodes)
+        if n == 0:
+            frage = ("⚠ ACHTUNG: Es würden 0 Pakete der Tour 1 zugeordnet!\n"
+                     "(Ist die Liste überhaupt geladen?)\n\n"
+                     f"Tour 1 trotzdem auf {jetzt} Uhr setzen?")
+        else:
+            frage = (f"Tour 1 jetzt auf {jetzt} Uhr setzen?\n\n"
+                     f"{n} verpackte Pakete werden Tour 1 zugeordnet.")
+        if not messagebox.askyesno("Tour 1 – Abfahrt setzen", frage):
+            return
+        _save_tour_zeiten(t1=jetzt, t2=tz.get("t2"), t1_barcodes=t1_barcodes,
+                          t1_set_by=_pc_name())
         self._restore_tour_buttons()
         self._recompute_tours_local()
         self._upload_tourliste("T1")
@@ -6218,7 +6244,8 @@ class PickupHeuteTab:
         if netz.get("t2"):
             # anderer PC war schneller – dessen Daten uebernehmen
             _save_tour_zeiten(netz.get("t1"), netz.get("t2"),
-                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []))
+                              netz.get("t1_barcodes", []), netz.get("t2_barcodes", []),
+                              netz.get("t1_set_by"), netz.get("t2_set_by"))
             self._restore_tour_buttons()
             self._recompute_tours_local()
             return
@@ -6226,9 +6253,24 @@ class PickupHeuteTab:
         if tz.get("t2"):
             return
         jetzt = (_dt.datetime.now()).strftime("%H:%M")
+        # ── Sicherheitsabfrage (verhindert versehentliches Stempeln) ──────
+        _t1_bcs = set(tz.get("t1_barcodes") or [])
+        n = len([r for r in self._all_rows
+                 if r.get("tb_status") == "Verpackt"
+                 and r.get("barcode") not in _t1_bcs])
+        if n == 0:
+            frage = ("⚠ ACHTUNG: Es würden 0 Pakete der Tour 2 zugeordnet!\n"
+                     "(Ist die Liste überhaupt geladen?)\n\n"
+                     f"Tour 2 trotzdem auf {jetzt} Uhr setzen?")
+        else:
+            frage = (f"Tour 2 jetzt auf {jetzt} Uhr setzen?\n\n"
+                     f"{n} verpackte Pakete werden Tour 2 zugeordnet.")
+        if not messagebox.askyesno("Tour 2 – Abfahrt setzen", frage):
+            return
         # T2 nutzt KEINEN Snapshot mehr – die Tour-Zuweisung erfolgt live bei
         # jedem Reload anhand "nicht in T1 + verpackt = T2"
-        _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=[])
+        _save_tour_zeiten(t1=tz.get("t1"), t2=jetzt, t2_barcodes=[],
+                          t2_set_by=_pc_name())
         self._restore_tour_buttons()
         self._recompute_tours_local()
         self._upload_tourliste("T2")
