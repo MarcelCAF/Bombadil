@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.60"
+VERSION = "1.0.61"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4468,8 +4468,17 @@ class StatistikTab:
                 eff = eff.fillna(fb)
             return eff.dt.tz_convert(None).dt.date.dropna()
 
-        normal_dates   = _to_dates(self._normal_df)
-        express_dates  = _to_dates(self._express_df)
+        def _sonntag_auf_montag(dates):
+            """Sonntags wird nicht geliefert: Buchungen mit Sonntags-Datum
+            werden dem darauffolgenden Montag zugerechnet (wirkt auf
+            Tages-, Wochen- UND Monatsansicht)."""
+            if dates.empty:
+                return dates
+            return dates.apply(
+                lambda d: d + timedelta(days=1) if d.weekday() == 6 else d)
+
+        normal_dates   = _sonntag_auf_montag(_to_dates(self._normal_df))
+        express_dates  = _sonntag_auf_montag(_to_dates(self._express_df))
         abholung_dates = _abholung_dates_from_main()
 
         today       = today_date()
@@ -4896,7 +4905,7 @@ class StatistikTab:
                 max_h = max(h1, h2, h3, h4, h5)
                 x_mid = (x1_l + x5_r) // 2
                 c.create_text(x_mid, min(base_y - max_h - 3, base_y - 4),
-                              text=str(n_total), anchor="s",
+                              text=f"∑ {n_total}", anchor="s",
                               font=("Segoe UI", 7), fill="#444")
 
             is_mo = weekday == 0
