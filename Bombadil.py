@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.75"
+VERSION = "1.0.76"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -7390,6 +7390,11 @@ class App(tk.Tk):
         self._load_settings()   # export_folder aus settings.json laden
         if ADMIN_MODE:
             self.after(5_000, self._schedule_backup_check)
+            # Einmalige Tagesbote-Sicherung beim Programmstart (nur Master-PC,
+            # im Hintergrund). Ergänzt das 17:00-Backup → es gibt zuverlässig
+            # mindestens eine aktuelle Drive-Kopie pro Tag, auch wenn der PC
+            # um 17:00 nicht lief.
+            self.after(20_000, self._startup_tagesbote_backup)
 
         # ---- Menüleiste
         menubar = tk.Menu(self)
@@ -9652,6 +9657,19 @@ class App(tk.Tk):
     # ── Backup ────────────────────────────────────────────────────────────
 
     _BACKUP_HOUR = 17  # 17:00 Uhr
+
+    def _startup_tagesbote_backup(self):
+        """Sichert den Tagesbote einmalig beim Programmstart auf Drive.
+        Nur Master-PC, im Hintergrund-Thread (blockiert die App nicht)."""
+        if not self.is_master_pc:
+            return
+        def _worker():
+            try:
+                res = backup_tagesbote_to_gdrive()
+                print(f"[Tagesbote-Start-Backup] {res}")
+            except Exception as e:
+                print(f"[Tagesbote-Start-Backup] Fehler: {e}")
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _schedule_backup_check(self):
         # Nur Master-PC macht automatische Backups (verhindert Mehrfach-
