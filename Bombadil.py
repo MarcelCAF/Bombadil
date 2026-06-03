@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.69"
+VERSION = "1.0.70"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -2425,12 +2425,16 @@ def compute_cleanup_candidates(df: pd.DataFrame):
     cutoff_scan     = today - timedelta(days=7)
 
     df = df.copy()
+    # format='mixed' nötig weil OrcaScan zwei verschiedene Datumsformate
+    # zurückgibt: ISO-Z ('2026-04-28T15:57:00Z') und ältere Einträge in
+    # anderem Format – ohne 'mixed' werden ~85% der Datumswerte als NaT
+    # behandelt und der Cleanup findet fälschlich nichts.
     if c_abgeholt:
-        df[c_abgeholt] = pd.to_datetime(df[c_abgeholt], errors="coerce")
+        df[c_abgeholt] = pd.to_datetime(df[c_abgeholt], errors="coerce", format="mixed")
     if c_abholbereit:
-        df[c_abholbereit] = pd.to_datetime(df[c_abholbereit], errors="coerce")
+        df[c_abholbereit] = pd.to_datetime(df[c_abholbereit], errors="coerce", format="mixed")
     if c_scan:
-        df[c_scan] = pd.to_datetime(df[c_scan], errors="coerce")
+        df[c_scan] = pd.to_datetime(df[c_scan], errors="coerce", format="mixed")
 
     # Kriterium 1: Abgeholt_At gesetzt + älter als 3 Werktage
     if c_abgeholt:
