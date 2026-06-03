@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.72"
+VERSION = "1.0.73"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3337,6 +3337,134 @@ def fetch_archiv_gdrive() -> "pd.DataFrame":
 
 
 # ============================================================
+# Mini-Kalender (eigenes tkinter-Widget, keine externe Abhängigkeit)
+# ============================================================
+class _DatePicker(tk.Frame):
+    """Datums-Auswahlfeld: zeigt das gewählte Datum als Button; Klick öffnet
+    ein Popup mit Monatskalender. Tag anklicken setzt das Datum.
+
+    Verwendung:
+        dp = _DatePicker(parent, value=date.today())
+        dp.get_date()  -> datetime.date | None
+    """
+    _WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    _MON = ["Januar", "Februar", "März", "April", "Mai", "Juni",
+            "Juli", "August", "September", "Oktober", "November", "Dezember"]
+
+    def __init__(self, parent, value=None, on_change=None, bg="#f0f2f5"):
+        super().__init__(parent, bg=bg)
+        import datetime as _dt
+        self._value = value if value is not None else _dt.date.today()
+        self._on_change = on_change
+        self._popup = None
+        # Anzeige-Button
+        self._btn = tk.Button(
+            self, text="", font=("Segoe UI", 9), padx=8, pady=2, bd=1,
+            bg="white", fg="#2c3e50", relief="groove", cursor="hand2",
+            command=self._open_popup)
+        self._btn.pack(fill="x")
+        self._refresh_label()
+
+    def get_date(self):
+        return self._value
+
+    def set_date(self, d):
+        self._value = d
+        self._refresh_label()
+
+    def _refresh_label(self):
+        self._btn.config(text=f"📅  {self._value.strftime('%d.%m.%Y')}")
+
+    def _open_popup(self):
+        if self._popup is not None:
+            try: self._popup.destroy()
+            except Exception: pass
+        self._nav_year  = self._value.year
+        self._nav_month = self._value.month
+        self._popup = tk.Toplevel(self)
+        self._popup.title("Datum wählen")
+        self._popup.transient(self.winfo_toplevel())
+        self._popup.configure(bg="white")
+        self._popup.resizable(False, False)
+        # Position unter dem Button
+        try:
+            x = self._btn.winfo_rootx()
+            y = self._btn.winfo_rooty() + self._btn.winfo_height()
+            self._popup.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+        self._build_calendar()
+        self._popup.grab_set()
+
+    def _build_calendar(self):
+        import calendar as _cal
+        for w in self._popup.winfo_children():
+            w.destroy()
+
+        # Kopf: ‹  Monat Jahr  ›
+        head = tk.Frame(self._popup, bg="white")
+        head.pack(fill="x", padx=6, pady=(6, 2))
+        tk.Button(head, text="‹", font=("Segoe UI", 11, "bold"), bd=0,
+                  bg="white", fg="#2c3e50", cursor="hand2", width=2,
+                  command=lambda: self._shift_month(-1)).pack(side="left")
+        tk.Label(head, text=f"{self._MON[self._nav_month-1]} {self._nav_year}",
+                 font=("Segoe UI", 10, "bold"), bg="white", fg="#2c3e50",
+                 width=16).pack(side="left", expand=True)
+        tk.Button(head, text="›", font=("Segoe UI", 11, "bold"), bd=0,
+                  bg="white", fg="#2c3e50", cursor="hand2", width=2,
+                  command=lambda: self._shift_month(1)).pack(side="right")
+
+        grid = tk.Frame(self._popup, bg="white")
+        grid.pack(padx=6, pady=(0, 6))
+        # Wochentags-Kopf
+        for ci, wd in enumerate(self._WD):
+            fg = "#c0392b" if ci >= 5 else "#7f8c8d"
+            tk.Label(grid, text=wd, font=("Segoe UI", 8, "bold"),
+                     bg="white", fg=fg, width=3).grid(row=0, column=ci, padx=1, pady=1)
+        # Tage
+        _cal.setfirstweekday(_cal.MONDAY)
+        weeks = _cal.monthcalendar(self._nav_year, self._nav_month)
+        for ri, week in enumerate(weeks, start=1):
+            for ci, day in enumerate(week):
+                if day == 0:
+                    tk.Label(grid, text="", bg="white", width=3).grid(
+                        row=ri, column=ci, padx=1, pady=1)
+                    continue
+                is_sel = (day == self._value.day and
+                          self._nav_month == self._value.month and
+                          self._nav_year == self._value.year)
+                b = tk.Button(
+                    grid, text=str(day), font=("Segoe UI", 9), width=3, bd=0,
+                    bg="#2c3e50" if is_sel else "white",
+                    fg="white" if is_sel else "#2c3e50",
+                    activebackground="#dde2e8", cursor="hand2",
+                    command=lambda d=day: self._pick(d))
+                b.grid(row=ri, column=ci, padx=1, pady=1)
+
+    def _shift_month(self, delta):
+        m = self._nav_month + delta
+        y = self._nav_year
+        while m < 1:
+            m += 12; y -= 1
+        while m > 12:
+            m -= 12; y += 1
+        self._nav_month, self._nav_year = m, y
+        self._build_calendar()
+
+    def _pick(self, day):
+        import datetime as _dt
+        self._value = _dt.date(self._nav_year, self._nav_month, day)
+        self._refresh_label()
+        if self._popup is not None:
+            try: self._popup.grab_release(); self._popup.destroy()
+            except Exception: pass
+            self._popup = None
+        if self._on_change:
+            try: self._on_change(self._value)
+            except Exception: pass
+
+
+# ============================================================
 # GUI – Statistik Tab (PU + DHL kombiniert)
 # ============================================================
 class StatistikTab:
@@ -3492,7 +3620,8 @@ class StatistikTab:
             self._pu_view_mode.set(mode)
             titles = {"weekly": "Letzte 4 Kalenderwochen",
                       "daily":  "Letzte 4 Wochen – Tagesansicht",
-                      "monthly":"Letzte 6 Monate"}
+                      "monthly":"Letzte 6 Monate",
+                      "range":  "Freier Zeitraum"}
             self._pu_chart_title_lbl.config(text=titles.get(mode, ""))
             for m, b in self._pu_toggle_btns.items():
                 b.config(bg="#2c3e50" if m == mode else "#dde2e8",
@@ -3504,11 +3633,18 @@ class StatistikTab:
                                               before=pu_toggle_frame)
             else:
                 self._monthly_goal_frame.pack_forget()
+            # Datums-Leiste nur im Zeitraum-Modus zeigen
+            if mode == "range":
+                self._pu_range_bar.pack(fill="x", pady=(4, 0), before=self._pu_canvas)
+                self._pu_apply_range()
+            else:
+                self._pu_range_bar.pack_forget()
             self._pu_redraw_chart()
 
         for _mode, _label, _active in [("daily", "Tagesansicht", False),
                                         ("weekly", "Wochenübersicht", True),
-                                        ("monthly", "Monatsübersicht", False)]:
+                                        ("monthly", "Monatsübersicht", False),
+                                        ("range", "Zeitraum", False)]:
             _b = tk.Button(pu_toggle_frame, text=_label,
                            font=("Segoe UI", 8), padx=8, pady=2, bd=1,
                            bg="#2c3e50" if _active else "#dde2e8",
@@ -3522,6 +3658,29 @@ class StatistikTab:
         self._pu_canvas.pack(fill="both", expand=True, pady=(4, 0))
         self._pu_canvas.bind("<Configure>", lambda e: self._pu_redraw_chart())
         self._pu_canvas.bind("<Button-1>", self._on_chart_click)
+
+        # ── Datums-Leiste PU (nur im Zeitraum-Modus sichtbar) ──────────
+        import datetime as _dt0
+        self._pu_range_from = _dt0.date.today() - _dt0.timedelta(days=30)
+        self._pu_range_to   = _dt0.date.today()
+        self._pu_range_bar = tk.Frame(chart_col, bg=self._COL_BG)
+        tk.Label(self._pu_range_bar, text="Von:", font=("Segoe UI", 9),
+                 bg=self._COL_BG, fg="#2c3e50").pack(side="left", padx=(0, 2))
+        self._pu_dp_from = _DatePicker(self._pu_range_bar, value=self._pu_range_from,
+                                       bg=self._COL_BG)
+        self._pu_dp_from.pack(side="left", padx=(0, 8))
+        tk.Label(self._pu_range_bar, text="Bis:", font=("Segoe UI", 9),
+                 bg=self._COL_BG, fg="#2c3e50").pack(side="left", padx=(0, 2))
+        self._pu_dp_to = _DatePicker(self._pu_range_bar, value=self._pu_range_to,
+                                     bg=self._COL_BG)
+        self._pu_dp_to.pack(side="left", padx=(0, 8))
+        tk.Button(self._pu_range_bar, text="Anzeigen", font=("Segoe UI", 8, "bold"),
+                  bg="#16a085", fg="white", relief="flat", padx=10, pady=2,
+                  cursor="hand2", command=self._pu_range_show).pack(side="left")
+        self._pu_range_sum_lbl = tk.Label(self._pu_range_bar, text="",
+                                          font=("Segoe UI", 9, "bold"),
+                                          bg=self._COL_BG, fg="#16a085")
+        self._pu_range_sum_lbl.pack(side="left", padx=(12, 0))
 
         # Vertikaler Trenner
         tk.Frame(pu_side, bg="#dde2e8", width=1).pack(side="left", fill="y", padx=(12, 12))
@@ -3653,7 +3812,8 @@ class StatistikTab:
             self._dhl_view_mode.set(mode)
             titles = {"daily":   "Letzte 4 Wochen – Tagesansicht",
                       "weekly":  "Letzte 4 Kalenderwochen",
-                      "monthly": "Letzte 6 Monate"}
+                      "monthly": "Letzte 6 Monate",
+                      "range":   "Freier Zeitraum"}
             self._dhl_chart_title_lbl.config(text=titles.get(mode, ""))
             for m, b in self._dhl_toggle_btns.items():
                 b.config(bg="#2c3e50" if m == mode else "#dde2e8",
@@ -3664,11 +3824,19 @@ class StatistikTab:
                                          before=dhl_toggle_frame)
             else:
                 self._dhl_goal_hint.pack_forget()
+            # Datums-Leiste nur im Zeitraum-Modus zeigen
+            if mode == "range":
+                self._dhl_range_bar.pack(fill="x", padx=20, pady=(0, 4),
+                                         before=self._dhl_canvas)
+                self._dhl_apply_range()
+            else:
+                self._dhl_range_bar.pack_forget()
             self._dhl_redraw_chart()
 
         for _mode, _label, _active in [("daily", "Tagesansicht", False),
                                         ("weekly", "Wochenübersicht", True),
-                                        ("monthly", "Monatsübersicht", False)]:
+                                        ("monthly", "Monatsübersicht", False),
+                                        ("range", "Zeitraum", False)]:
             _b = tk.Button(dhl_toggle_frame, text=_label,
                            font=("Segoe UI", 8), padx=8, pady=2, bd=1,
                            bg="#2c3e50" if _active else "#dde2e8",
@@ -3677,6 +3845,29 @@ class StatistikTab:
                            command=lambda m=_mode: _dhl_switch_view(m))
             _b.pack(side="left", padx=(0, 2))
             self._dhl_toggle_btns[_mode] = _b
+
+        # ── Datums-Leiste DHL (nur im Zeitraum-Modus sichtbar) ─────────
+        import datetime as _dt1
+        self._dhl_range_from = _dt1.date.today() - _dt1.timedelta(days=30)
+        self._dhl_range_to   = _dt1.date.today()
+        self._dhl_range_bar = tk.Frame(self._inner, bg=self._COL_BG)
+        tk.Label(self._dhl_range_bar, text="Von:", font=("Segoe UI", 9),
+                 bg=self._COL_BG, fg="#2c3e50").pack(side="left", padx=(0, 2))
+        self._dhl_dp_from = _DatePicker(self._dhl_range_bar, value=self._dhl_range_from,
+                                        bg=self._COL_BG)
+        self._dhl_dp_from.pack(side="left", padx=(0, 8))
+        tk.Label(self._dhl_range_bar, text="Bis:", font=("Segoe UI", 9),
+                 bg=self._COL_BG, fg="#2c3e50").pack(side="left", padx=(0, 2))
+        self._dhl_dp_to = _DatePicker(self._dhl_range_bar, value=self._dhl_range_to,
+                                      bg=self._COL_BG)
+        self._dhl_dp_to.pack(side="left", padx=(0, 8))
+        tk.Button(self._dhl_range_bar, text="Anzeigen", font=("Segoe UI", 8, "bold"),
+                  bg="#2c3e50", fg="white", relief="flat", padx=10, pady=2,
+                  cursor="hand2", command=self._dhl_range_show).pack(side="left")
+        self._dhl_range_sum_lbl = tk.Label(self._dhl_range_bar, text="",
+                                           font=("Segoe UI", 9, "bold"),
+                                           bg=self._COL_BG, fg="#2c3e50")
+        self._dhl_range_sum_lbl.pack(side="left", padx=(12, 0))
 
         self._dhl_canvas = tk.Canvas(self._inner, bg=self._COL_BG, height=260, highlightthickness=0)
         self._dhl_canvas.pack(fill="x", padx=20, pady=(4, 24))
@@ -4202,12 +4393,19 @@ class StatistikTab:
         self._pu_redraw_kiosk_table()
         self._bind_mousewheel(self._inner)
 
+        # Zähl-Bausteine für die freie Zeitraum-Ansicht speichern
+        self._pu_count_anlief = count_anlief_in_range
+        self._pu_count_abhol  = count_abhol_in_range
+
         ts = datetime.now().strftime("%d.%m.%Y %H:%M")
         n_total = len(combined)
         n_archiv = len(self._archiv_df) if self._archiv_df is not None else 0
         self._pu_status_lbl.config(
             text=f"Stand {ts}  –  {n_total} Einträge gesamt  ({len(frames[0])} aktuell + {n_archiv} Archiv)"
         )
+        # Falls aktuell die Zeitraum-Ansicht aktiv ist → neu berechnen
+        if self._pu_view_mode.get() == "range":
+            self._pu_apply_range()
         self._pu_redraw_chart()
 
     def _pu_switch_kiosk_range(self, mode: str):
@@ -4312,7 +4510,9 @@ class StatistikTab:
 
     def _pu_redraw_chart(self):
         view = self._pu_view_mode.get()
-        if view == "monthly":
+        if view == "range":
+            data = getattr(self, "_pu_range_data", [])
+        elif view == "monthly":
             data = self._pu_monthly_data
         elif view == "daily":
             data = self._pu_daily_data
@@ -4324,7 +4524,9 @@ class StatistikTab:
             c.create_text(10, 20, text="Bitte Abholer_DB laden …",
                           anchor="nw", font=("Segoe UI", 10), fill="#999")
             return
-        if view == "daily":
+        _range_gran = getattr(self, "_pu_range_granularity", "daily")
+        use_daily = (view == "daily") or (view == "range" and _range_gran == "daily")
+        if use_daily:
             self._pu_redraw_chart_daily(data)
             return
 
@@ -4716,6 +4918,15 @@ class StatistikTab:
                             ms.strftime("%Y-%m")))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
+        # Zähl-Bausteine für die freie Zeitraum-Ansicht speichern (Closures
+        # bleiben gültig – greifen auf normal_dates/express_dates etc. zu).
+        self._dhl_count          = count
+        self._dhl_count_pu       = count_pu_in_range
+        self._dhl_count_sameday  = count_sameday_in_range
+        self._dhl_count_nextday  = count_nextday_in_range
+        self._dhl_normal_dates   = normal_dates
+        self._dhl_express_dates  = express_dates
+
         self._bind_mousewheel(self._inner)
         ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
         n_n = len(self._normal_df)  if self._normal_df  is not None else 0
@@ -4723,11 +4934,135 @@ class StatistikTab:
         n_a = int(abholung_dates.count()) if not abholung_dates.empty else 0
         self._dhl_status_lbl.config(
             text=f"Stand {ts}  –  {n_n} Normal · {n_e} Express · {n_a} Pickup")
+        # Falls aktuell die Zeitraum-Ansicht aktiv ist → neu berechnen
+        if self._dhl_view_mode.get() == "range":
+            self._dhl_apply_range()
         self._dhl_redraw_chart()
+
+    # ── Freie Zeitraum-Ansicht (DHL + PU) ────────────────────────────
+    def _make_buckets(self, d_from, d_to):
+        """Teilt den Zeitraum [d_from, d_to] (beide inklusiv) in Balken-Buckets.
+        Wählt automatisch Tag/Woche/Monat je nach Länge, damit der Chart lesbar
+        bleibt. Returns (granularity, [(label, start, end_exclusive, weekday), ...]).
+        weekday ist nur bei Tagesgranularität gesetzt (sonst None)."""
+        import datetime as _dt
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from
+        span_days = (d_to - d_from).days + 1
+        buckets = []
+
+        if span_days <= 31:
+            gran = "daily"
+            d = d_from
+            while d <= d_to:
+                buckets.append((d.strftime("%d.%m."), d, d + _dt.timedelta(days=1),
+                                d.weekday()))
+                d += _dt.timedelta(days=1)
+        elif span_days <= 182:
+            gran = "weekly"
+            # An Wochengrenzen (Montag) ausrichten
+            ws = d_from - _dt.timedelta(days=d_from.weekday())
+            while ws <= d_to:
+                we = ws + _dt.timedelta(days=7)
+                kw = ws.isocalendar()[1]
+                label = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}"
+                buckets.append((label, ws, we, None))
+                ws = we
+        else:
+            gran = "monthly"
+            _MON = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
+                    "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+            ms = d_from.replace(day=1)
+            while ms <= d_to:
+                if ms.month == 12:
+                    me = ms.replace(year=ms.year + 1, month=1, day=1)
+                else:
+                    me = ms.replace(month=ms.month + 1, day=1)
+                label = f"{_MON[ms.month-1]} {ms.strftime('%y')}"
+                buckets.append((label, ms, me, None))
+                ms = me
+        return gran, buckets
+
+    def _dhl_apply_range(self):
+        """Baut die DHL-Zeitraum-Daten aus self._dhl_range_from/to."""
+        d_from = getattr(self, "_dhl_range_from", None)
+        d_to   = getattr(self, "_dhl_range_to", None)
+        if d_from is None or d_to is None:
+            return
+        if not hasattr(self, "_dhl_count"):
+            return   # Daten noch nicht geladen
+        gran, buckets = self._make_buckets(d_from, d_to)
+        self._dhl_range_granularity = gran
+        data = []
+        sum_n = sum_e = sum_p = sum_s = sum_x = 0
+        for label, start, end, wd in buckets:
+            n = self._dhl_count(self._dhl_normal_dates,  start, end)
+            e = self._dhl_count(self._dhl_express_dates, start, end)
+            p = self._dhl_count_pu(start, end)
+            s = self._dhl_count_sameday(start, end)
+            x = self._dhl_count_nextday(start, end)
+            sum_n += n; sum_e += e; sum_p += p; sum_s += s; sum_x += x
+            if gran == "daily":
+                data.append((label, n, e, p, s, x, wd))
+            else:
+                data.append((label, n, e, p, s, x))
+        self._dhl_range_data = data
+        self._dhl_range_sum  = (sum_n, sum_e, sum_p, sum_s, sum_x)
+        ges = sum_n + sum_e + sum_p + sum_s + sum_x
+        hint = ""
+        try:
+            if (not self._dhl_normal_dates.empty and
+                    d_from < min(self._dhl_normal_dates)):
+                hint = "  ⚠ evtl. unvollständig"
+        except Exception:
+            pass
+        self._dhl_range_sum_lbl.config(
+            text=f"Σ {ges}  (Normal {sum_n} · Express {sum_e} · Pickup {sum_p}){hint}")
+
+    def _dhl_range_show(self):
+        """'Anzeigen'-Klick: Datumswerte übernehmen und Chart aktualisieren."""
+        self._dhl_range_from = self._dhl_dp_from.get_date()
+        self._dhl_range_to   = self._dhl_dp_to.get_date()
+        self._dhl_apply_range()
+        self._dhl_redraw_chart()
+
+    def _pu_apply_range(self):
+        """Baut die PU-Zeitraum-Daten aus self._pu_range_from/to."""
+        d_from = getattr(self, "_pu_range_from", None)
+        d_to   = getattr(self, "_pu_range_to", None)
+        if d_from is None or d_to is None:
+            return
+        if not hasattr(self, "_pu_count_anlief"):
+            return
+        gran, buckets = self._make_buckets(d_from, d_to)
+        self._pu_range_granularity = gran
+        data = []
+        sum_a = sum_b = 0
+        for label, start, end, wd in buckets:
+            a = self._pu_count_anlief(start, end)
+            b = self._pu_count_abhol(start, end)
+            sum_a += a; sum_b += b
+            if gran == "daily":
+                data.append((label, a, b, wd))
+            else:
+                data.append((label, a, b))
+        self._pu_range_data = data
+        self._pu_range_sum  = (sum_a, sum_b)
+        self._pu_range_sum_lbl.config(
+            text=f"Σ Lieferungen {sum_a}  ·  Abholungen {sum_b}")
+
+    def _pu_range_show(self):
+        """'Anzeigen'-Klick: Datumswerte übernehmen und Chart aktualisieren."""
+        self._pu_range_from = self._pu_dp_from.get_date()
+        self._pu_range_to   = self._pu_dp_to.get_date()
+        self._pu_apply_range()
+        self._pu_redraw_chart()
 
     def _dhl_redraw_chart(self):
         view = self._dhl_view_mode.get()
-        if view == "monthly":
+        if view == "range":
+            data = getattr(self, "_dhl_range_data", [])
+        elif view == "monthly":
             data = self._dhl_monthly_data
         elif view == "daily":
             data = self._dhl_daily_data
@@ -4739,7 +5074,10 @@ class StatistikTab:
             c.create_text(10, 20, text="Bitte Daten laden …",
                           anchor="nw", font=("Segoe UI", 10), fill="#999")
             return
-        if view == "daily":
+        # Granularität bei Zeitraum-Ansicht bestimmt die Darstellung
+        _range_gran = getattr(self, "_dhl_range_granularity", "daily")
+        use_daily = (view == "daily") or (view == "range" and _range_gran == "daily")
+        if use_daily:
             self._dhl_redraw_chart_daily(data)
             return
 
