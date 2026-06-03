@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.71"
+VERSION = "1.0.72"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3806,15 +3806,34 @@ class StatistikTab:
             print(f"[Cache] Fehler beim Anwenden: {_e}")
 
     def _try_save_cache_if_ready(self):
-        """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind
-        UND DHL-Daten vorhanden sind (verhindert kaputten Cache bei Timeout).
-        NUR der Master-PC lädt hoch – sonst könnten Kollegen-PCs (z.B. ohne
-        NAS) mit unvollständigen Daten den gemeinsamen Cache überschreiben."""
+        """Speichert den Cache nur wenn PU UND DHL beide fertig geladen sind,
+        DHL-Daten vorhanden sind UND Drive erreichbar war.
+
+        WICHTIG (drive_ok): Wenn das Drive-Archiv nicht geladen werden konnte
+        (Verbindungsaussetzer), wären die Tagesdaten unvollständig – z.B. ein
+        Werktag zeigt 0 obwohl Pakete da sind. So ein kaputter Cache wird als
+        'heute frisch' markiert und friert den Fehler den ganzen Tag ein (alle
+        Kollegen-PCs sehen die 0). Darum: bei Drive-Ausfall NICHT speichern.
+
+        Feiertag-sicher: An Feiertagen ist Drive trotzdem erreichbar (das Archiv
+        lädt mit allen anderen Tagen), drive_ok=True → die echte 0 für den
+        Feiertag wird korrekt gespeichert. Wir prüfen NICHT 'Tag == 0', sondern
+        nur ob das Archiv überhaupt geladen wurde.
+
+        NUR der Master-PC lädt hoch."""
         if not self._is_master:
             return
-        if not self._pu_loading and not self._dhl_loading:
-            if self._dhl_weekly_data:   # nur speichern wenn DHL-Daten vorhanden
-                self._save_cache_async()
+        if self._pu_loading or self._dhl_loading:
+            return
+        if not self._dhl_weekly_data:
+            return   # keine DHL-Daten → nicht cachen
+        if not getattr(self, "_dhl_drive_ok", True):
+            # Drive war nicht erreichbar → Daten unvollständig → nicht cachen.
+            # Der alte (gute) Cache bleibt erhalten, statt mit Lücken überschrieben.
+            self._dhl_status_lbl.config(
+                text="⚠  Drive-Archiv unvollständig – Cache NICHT aktualisiert")
+            return
+        self._save_cache_async()
 
     def _save_cache_async(self):
         """Speichert die aktuellen Chart-Daten als Cache auf Drive (im Hintergrund)."""
