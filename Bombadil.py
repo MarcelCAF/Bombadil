@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.73"
+VERSION = "1.0.74"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8626,11 +8626,11 @@ class App(tk.Tk):
         self._gimli_busy  = False
 
     def _gimli_search(self):
-        """Durchsucht die NAS-Archive direkt nach der eingegebenen Sendungsnummer.
+        """Durchsucht NAS-Archiv + Drive-Backups + Live-OrcaScan nach der
+        eingegebenen Sendungsnummer.
 
-        Liest die Excel-Dateien wie das eigenständige Skript – aber im
-        Hintergrund (damit die App nicht einfriert) und merkt sich die
-        gelesenen Daten, sodass jede weitere Suche sofort kommt.
+        Läuft im Hintergrund (damit die App nicht einfriert) und merkt sich
+        die gelesenen Daten, sodass jede weitere Suche sofort kommt.
         """
         if self._gimli_busy:
             return  # läuft bereits
@@ -8651,22 +8651,25 @@ class App(tk.Tk):
             return
 
         # Typ anhand des Barcode-Anfangs vorbestimmen (durchsucht nur den
-        # passenden Ordner → halbe Datenmenge, schneller):
+        # passenden Typ → halbe Datenmenge, schneller):
         #   "J…"  → DHL Express (Barcode beginnt mit JJD0)
         #   Ziffer → DHL Normal (Barcode beginnt mit 00)
         #   sonst  → beide durchsuchen
+        # Pro Typ: (Anzeige-Name, NAS-Ordner, OrcaScan-Sheet-ID)
         if roh_eingabe[:1].upper() == "J":
-            ordner = [("DHL Express", DHL_NAS_EXPRESS_DIR)]
+            quellen = [("DHL Express", DHL_NAS_EXPRESS_DIR, ORCA_DHL_EX_SHEET_ID)]
         elif roh_eingabe[:1].isdigit():
-            ordner = [("DHL Normal", DHL_NAS_NORMAL_DIR)]
+            quellen = [("DHL Normal", DHL_NAS_NORMAL_DIR, ORCA_DHL_NORMAL_SHEET_ID)]
         else:
-            ordner = [("DHL Normal", DHL_NAS_NORMAL_DIR),
-                      ("DHL Express", DHL_NAS_EXPRESS_DIR)]
+            quellen = [("DHL Normal", DHL_NAS_NORMAL_DIR, ORCA_DHL_NORMAL_SHEET_ID),
+                       ("DHL Express", DHL_NAS_EXPRESS_DIR, ORCA_DHL_EX_SHEET_ID)]
 
-        # Muss das Archiv erst gelesen werden? (beim ersten Mal pro Typ)
-        muss_laden = any(typ not in self._gimli_cache for typ, _ in ordner)
+        # Muss erst eingelesen werden? (beim ersten Mal)
+        muss_laden = "DRIVE" not in self._gimli_cache or any(
+            f"{typ}|NAS" not in self._gimli_cache for typ, _, _ in quellen)
         if muss_laden:
-            self._gimli_status.config(text="🔍  Suche läuft … (Archiv wird einmalig eingelesen)")
+            self._gimli_status.config(
+                text="🔍  Suche läuft … (Archiv + Drive + Live werden einmalig eingelesen)")
         else:
             self._gimli_status.config(text="🔍  Suche läuft …")
 
@@ -8675,31 +8678,72 @@ class App(tk.Tk):
         def _worker():
             try:
                 treffer = []
-                for typ, folder in ordner:
-                    df = self._gimli_cache.get(typ)
-                    if df is None:
-                        df = load_dhl_nas_archive(folder)
-                        if df is not None and not df.empty:
-                            self._gimli_cache[typ] = df   # merken
-                    if df is None or df.empty:
-                        continue
-                    bc_col = first_existing(df, ORCA_COL_BARCODE)
-                    sc_col = first_existing(df, ORCA_COL_SCAN)
-                    if not bc_col:
-                        continue
-                    norm = df[bc_col].map(clean_barcode).str.lstrip("0")
-                    mask = norm.str.contains(such, na=False, regex=False)
-                    for idx in df.index[mask]:
-                        roh = clean_barcode(df.at[idx, bc_col])
-                        # Führende 00 ergänzen bei rein numerischen (Normal-)Barcodes
-                        anzeige = "00" + roh if (roh.isdigit() and not roh.startswith("00")) else roh
-                        scan = fmt_dt(df.at[idx, sc_col]) if sc_col else ""
-                        treffer.append((anzeige, typ, scan))
+                seen = set()   # dedupliziert gleiche Sendung aus mehreren Quellen
+                for typ, folder, sheet_id in quellen:
+                    for quelle, df in self._gimli_get_sources(typ, folder, sheet_id):
+                        if df is None or df.empty:
+                            continue
+                        bc_col = first_existing(df, ORCA_COL_BARCODE)
+                        sc_col = first_existing(df, ORCA_COL_SCAN)
+                        if not bc_col:
+                            continue
+                        norm = df[bc_col].map(clean_barcode).str.lstrip("0")
+                        mask = norm.str.contains(such, na=False, regex=False)
+                        for idx in df.index[mask]:
+                            roh = clean_barcode(df.at[idx, bc_col])
+                            # Führende 00 bei rein numerischen (Normal-)Barcodes ergänzen
+                            anzeige = "00" + roh if (roh.isdigit() and not roh.startswith("00")) else roh
+                            if anzeige in seen:
+                                continue
+                            seen.add(anzeige)
+                            scan = fmt_dt(df.at[idx, sc_col]) if sc_col else ""
+                            treffer.append((anzeige, typ, scan, quelle))
                 self.tab_gimli.after(0, lambda: self._gimli_show_results(eingabe, treffer))
             except Exception as e:
                 self.tab_gimli.after(0, lambda err=e: self._gimli_show_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _gimli_get_sources(self, typ, folder, sheet_id):
+        """Liefert [(quelle_label, df), ...] für einen DHL-Typ aus 3 Quellen:
+        NAS-Archiv, Drive-Backups und Live-OrcaScan. Alles wird gecacht, sodass
+        weitere Suchen sofort kommen."""
+        cache = self._gimli_cache
+        out = []
+
+        # 1. NAS-Archiv (lange Historie)
+        nas_key = f"{typ}|NAS"
+        if nas_key not in cache:
+            try:
+                cache[nas_key] = load_dhl_nas_archive(folder)
+            except Exception:
+                cache[nas_key] = None
+        if cache.get(nas_key) is not None:
+            out.append(("Archiv", cache[nas_key]))
+
+        # 2. Drive-Backups (letzte Wochen) – liefert beide Typen auf einmal
+        if "DRIVE" not in cache:
+            try:
+                n_arch, e_arch = fetch_dhl_archiv_gdrive()
+            except Exception:
+                n_arch, e_arch = None, None
+            cache["DRIVE"] = {"DHL Normal": n_arch, "DHL Express": e_arch}
+        drv = cache["DRIVE"].get(typ)
+        if drv is not None:
+            out.append(("Drive", drv))
+
+        # 3. Live-OrcaScan (aktuellste Sendungen, auch heute)
+        live_key = f"{typ}|LIVE"
+        if live_key not in cache:
+            try:
+                cache[live_key] = fetch_sheet_orca(
+                    sheet_id, drop_cols={"signature", "packagePhoto"})
+            except Exception:
+                cache[live_key] = None
+        if cache.get(live_key) is not None:
+            out.append(("Live", cache[live_key]))
+
+        return out
 
     def _gimli_show_error(self, err):
         self._gimli_busy = False
@@ -8719,12 +8763,12 @@ class App(tk.Tk):
         self._gimli_status.config(text=f"✅  {len(treffer)} Treffer für „{eingabe}“")
 
         # Treffer als Karten anzeigen (max. 50)
-        for anzeige, typ, scan in treffer[:50]:
+        for anzeige, typ, scan, quelle in treffer[:50]:
             card = tk.Frame(self._gimli_result, bg="white", relief="solid", bd=1)
             card.pack(fill="x", pady=4)
             tk.Label(card, text=anzeige, font=("Consolas", 13, "bold"),
                      bg="white", fg="#1a5276", anchor="w").pack(fill="x", padx=12, pady=(8, 0))
-            info = f"Typ: {typ}        Scan-Datum: {scan or 'unbekannt'}"
+            info = f"Typ: {typ}        Scan-Datum: {scan or 'unbekannt'}        Quelle: {quelle}"
             tk.Label(card, text=info, font=("Segoe UI", 10),
                      bg="white", fg="#2c3e50", anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
