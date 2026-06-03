@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.74"
+VERSION = "1.0.75"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -3636,7 +3636,7 @@ class StatistikTab:
             # Datums-Leiste nur im Zeitraum-Modus zeigen
             if mode == "range":
                 self._pu_range_bar.pack(fill="x", pady=(4, 0), before=self._pu_canvas)
-                self._pu_apply_range()
+                self._pu_ensure_range()
             else:
                 self._pu_range_bar.pack_forget()
             self._pu_redraw_chart()
@@ -3828,7 +3828,7 @@ class StatistikTab:
             if mode == "range":
                 self._dhl_range_bar.pack(fill="x", padx=20, pady=(0, 4),
                                          before=self._dhl_canvas)
-                self._dhl_apply_range()
+                self._dhl_ensure_range()
             else:
                 self._dhl_range_bar.pack_forget()
             self._dhl_redraw_chart()
@@ -5023,8 +5023,19 @@ class StatistikTab:
         """'Anzeigen'-Klick: Datumswerte übernehmen und Chart aktualisieren."""
         self._dhl_range_from = self._dhl_dp_from.get_date()
         self._dhl_range_to   = self._dhl_dp_to.get_date()
-        self._dhl_apply_range()
-        self._dhl_redraw_chart()
+        self._dhl_ensure_range()
+
+    def _dhl_ensure_range(self):
+        """Baut die Zeitraum-Daten – lädt die DHL-Rohdaten erst nach, falls sie
+        fehlen (z.B. wenn nur der Tages-Cache geladen wurde)."""
+        if hasattr(self, "_dhl_count"):
+            self._dhl_apply_range()
+            self._dhl_redraw_chart()
+        elif not self._dhl_loading:
+            # Rohdaten fehlen → nachladen; nach dem Laden ruft
+            # _dhl_recalculate_inner automatisch _dhl_apply_range (view==range)
+            self._dhl_status_lbl.config(text="⏳  Lade DHL-Daten für Zeitraum …")
+            self.load_dhl_async()
 
     def _pu_apply_range(self):
         """Baut die PU-Zeitraum-Daten aus self._pu_range_from/to."""
@@ -5055,8 +5066,19 @@ class StatistikTab:
         """'Anzeigen'-Klick: Datumswerte übernehmen und Chart aktualisieren."""
         self._pu_range_from = self._pu_dp_from.get_date()
         self._pu_range_to   = self._pu_dp_to.get_date()
-        self._pu_apply_range()
-        self._pu_redraw_chart()
+        self._pu_ensure_range()
+
+    def _pu_ensure_range(self):
+        """Baut die Zeitraum-Daten – lädt die PU-Rohdaten erst nach, falls sie
+        fehlen (z.B. wenn nur der Tages-Cache geladen wurde)."""
+        if hasattr(self, "_pu_count_anlief"):
+            self._pu_apply_range()
+            self._pu_redraw_chart()
+        elif not self._pu_loading:
+            # Rohdaten fehlen → Archiv nachladen; nach dem Laden ruft
+            # _pu_recalculate_inner automatisch _pu_apply_range (view==range)
+            self._pu_status_lbl.config(text="⏳  Lade PU-Daten für Zeitraum …")
+            self.load_archive_async()
 
     def _dhl_redraw_chart(self):
         view = self._dhl_view_mode.get()
@@ -5346,9 +5368,24 @@ class StatistikTab:
                 c.create_rectangle(x5_l, base_y - h5, x5_r, base_y,
                                    fill=self._COL_NEXTDAY, outline="")
 
-            # Tages-Gesamtzahl über der Gruppe
+            # Einzelzahlen über jedem Balken – nur wenn genug Platz, sonst
+            # überlappen sie. Bei vielen Tagen stattdessen die Gesamtsumme.
             n_total = n_normal + n_express + n_abholung + n_sameday + n_nextday
-            if n_total:
+            zeige_einzel = (bar_w + bar_gap) >= 13
+            if zeige_einzel:
+                _bars = [
+                    ((x1_l + x1_r) // 2, n_normal,   h1, "#f57f17"),
+                    ((x2_l + x2_r) // 2, n_express,  h2, "#7f0000"),
+                    ((x3_l + x3_r) // 2, n_abholung, h3, self._COL_ABHOLUNG),
+                    ((x4_l + x4_r) // 2, n_sameday,  h4, self._COL_SAMEDAY),
+                    ((x5_l + x5_r) // 2, n_nextday,  h5, self._COL_NEXTDAY),
+                ]
+                for bx, val, bh, col in _bars:
+                    if val:
+                        c.create_text(bx, base_y - bh - 2, text=str(val),
+                                      anchor="s", font=("Segoe UI", 7, "bold"),
+                                      fill=col)
+            elif n_total:
                 max_h = max(h1, h2, h3, h4, h5)
                 x_mid = (x1_l + x5_r) // 2
                 c.create_text(x_mid, min(base_y - max_h - 3, base_y - 4),
