@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.70"
+VERSION = "1.0.71"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -980,11 +980,21 @@ def fetch_dhl_archiv_gdrive() -> tuple:
             comb = comb.drop_duplicates(subset=[bc], keep="last")
         return comb
 
-    # Normal-Archiv aus DHL-Normal-Ordner, Express-Archiv aus EXPRESS-Ordner
-    normal  = _merge_two(_load_for_prefix("DHL_Normal_Archiv", GDRIVE_FOLDER_DHL_NORMAL),
-                         _load_for_prefix("DHL_Normal_Backup",  GDRIVE_FOLDER_DHL_NORMAL))
-    express = _merge_two(_load_for_prefix("DHL_Express_Archiv", GDRIVE_FOLDER_DHL_EXPRESS),
-                         _load_for_prefix("DHL_Express_Backup",  GDRIVE_FOLDER_DHL_EXPRESS))
+    # Normal-Archiv aus DHL-Normal-Ordner, Express-Archiv aus EXPRESS-Ordner.
+    # RETRY: Das Archiv hat seit 23.05. IMMER Daten. Wenn beide leer
+    # zurückkommen, ist Drive nur kurz nicht erreichbar (Timeout) → bis zu
+    # 4 Versuche mit 3s Pause, bevor wir aufgeben.
+    import time as _time
+    normal, express = pd.DataFrame(), pd.DataFrame()
+    for _attempt in range(4):
+        normal  = _merge_two(_load_for_prefix("DHL_Normal_Archiv", GDRIVE_FOLDER_DHL_NORMAL),
+                             _load_for_prefix("DHL_Normal_Backup",  GDRIVE_FOLDER_DHL_NORMAL))
+        express = _merge_two(_load_for_prefix("DHL_Express_Archiv", GDRIVE_FOLDER_DHL_EXPRESS),
+                             _load_for_prefix("DHL_Express_Backup",  GDRIVE_FOLDER_DHL_EXPRESS))
+        if not normal.empty and not express.empty:
+            break   # Erfolg → fertig
+        if _attempt < 3:
+            _time.sleep(3)   # kurz warten, dann nochmal
     return normal, express
 
 
@@ -3231,82 +3241,99 @@ class DHLMergeTab:
 # ============================================================
 def fetch_archiv_gdrive() -> "pd.DataFrame":
     """
-    Lädt alle Abholer_DB_Archiv_*.xlsx Dateien aus dem Archiv-Ordner (Google Drive).
-    Benutzt OAuth2 (gleicher Mechanismus wie der Archiv-Upload beim Cleanup).
-    Gibt einen kombinierten DataFrame zurück (leerer DF wenn keine Archive vorhanden).
+    Lädt alle Abholer_DB_Archiv_*.xlsx + Abholer_DB_Backup_*.xlsx aus dem
+    Archiv-Ordner (Google Drive). Gibt einen kombinierten DataFrame zurück.
+
+    RETRY: Das Archiv hat seit 23.05. IMMER Daten. Wenn leer/Fehler
+    zurückkommt, ist Drive nur kurz nicht erreichbar → bis zu 4 Versuche
+    mit 3s Pause, bevor wir aufgeben.
     """
     if not GDRIVE_AVAILABLE:
         raise RuntimeError("Google API nicht verfügbar (pip install google-api-python-client google-auth).")
 
-    service = _get_oauth_drive_service()
+    def _load_once() -> "pd.DataFrame":
+        service = _get_oauth_drive_service()
 
-    # Beide Datei-Typen laden:
-    # - Abholer_DB_Archiv_* → Cleanup-Archive (Pakete die aus OrcaScan entfernt wurden)
-    # - Abholer_DB_Backup_* → Tägliche Snapshots (seit v1.0.46, Fallback bei DB-Löschung)
-    files = []
-    for pattern in ("Abholer_DB_Archiv", "Abholer_DB_Backup"):
-        res = service.files().list(
-            q=(
-                f"'{GDRIVE_FOLDER_ABHOLER}' in parents "
-                f"and name contains '{pattern}' "
-                f"and trashed = false"
-            ),
-            fields="files(id, name, mimeType)",
-            orderBy="modifiedTime desc",
-            pageSize=500,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        files.extend(res.get("files", []))
-    if not files:
-        return pd.DataFrame()
+        # Beide Datei-Typen laden:
+        # - Abholer_DB_Archiv_* → Cleanup-Archive (Pakete aus OrcaScan entfernt)
+        # - Abholer_DB_Backup_* → Tägliche Snapshots (Fallback bei DB-Löschung)
+        files = []
+        for pattern in ("Abholer_DB_Archiv", "Abholer_DB_Backup"):
+            res = service.files().list(
+                q=(
+                    f"'{GDRIVE_FOLDER_ABHOLER}' in parents "
+                    f"and name contains '{pattern}' "
+                    f"and trashed = false"
+                ),
+                fields="files(id, name, mimeType)",
+                orderBy="modifiedTime desc",
+                pageSize=500,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            files.extend(res.get("files", []))
+        if not files:
+            return pd.DataFrame()
 
-    # ── Nur Dateien der letzten 12 Monate laden (Datum aus Dateiname) ──────
-    import re as _re2
-    from datetime import date as _date
-    _cutoff = _date.today().replace(year=_date.today().year - 1)
-    filtered_files = []
-    for f in files:
-        m = _re2.search(r'(\d{4}-\d{2}-\d{2})', f.get("name", ""))
-        if m:
+        # ── Nur Dateien der letzten 12 Monate laden (Datum aus Dateiname) ──
+        import re as _re2
+        from datetime import date as _date
+        _cutoff = _date.today().replace(year=_date.today().year - 1)
+        filtered_files = []
+        for f in files:
+            m = _re2.search(r'(\d{4}-\d{2}-\d{2})', f.get("name", ""))
+            if m:
+                try:
+                    file_date = _date.fromisoformat(m.group(1))
+                    if file_date >= _cutoff:
+                        filtered_files.append(f)
+                except ValueError:
+                    pass   # Dateiname mit ungültigem Datum überspringen
+            # Dateien ohne erkennbares Datum werden übersprungen
+        files = filtered_files
+
+        if not files:
+            return pd.DataFrame()
+
+        import io as _io2
+        all_frames = []
+        for file in files:
             try:
-                file_date = _date.fromisoformat(m.group(1))
-                if file_date >= _cutoff:
-                    filtered_files.append(f)
-            except ValueError:
-                pass   # Dateiname mit ungültigem Datum überspringen
-        # Dateien ohne erkennbares Datum werden übersprungen
-    files = filtered_files
+                request = service.files().get_media(fileId=file["id"])
+                buf = _io2.BytesIO()
+                downloader = MediaIoBaseDownload(buf, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                buf.seek(0)
+                df = pd.read_excel(buf)
+                if not df.empty:
+                    all_frames.append(df)
+            except Exception:
+                pass  # Fehlerhafte Datei überspringen
 
-    if not files:
-        return pd.DataFrame()
+        if not all_frames:
+            return pd.DataFrame()
 
-    import io as _io2
-    all_frames = []
-    for file in files:
+        combined = pd.concat(all_frames, ignore_index=True)
+        # Duplikate entfernen (gleicher Barcode kann in mehreren Dateien sein)
+        c_bc = first_existing(combined, COL_BARCODE)
+        if c_bc:
+            combined = combined.drop_duplicates(subset=[c_bc], keep="last")
+        return combined
+
+    import time as _time
+    result = pd.DataFrame()
+    for _attempt in range(4):
         try:
-            request = service.files().get_media(fileId=file["id"])
-            buf = _io2.BytesIO()
-            downloader = MediaIoBaseDownload(buf, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            buf.seek(0)
-            df = pd.read_excel(buf)
-            if not df.empty:
-                all_frames.append(df)
+            result = _load_once()
         except Exception:
-            pass  # Fehlerhafte Datei überspringen
-
-    if not all_frames:
-        return pd.DataFrame()
-
-    combined = pd.concat(all_frames, ignore_index=True)
-    # Duplikate entfernen (gleicher Barcode kann in mehreren Archiv-Dateien vorkommen)
-    c_bc = first_existing(combined, COL_BARCODE)
-    if c_bc:
-        combined = combined.drop_duplicates(subset=[c_bc], keep="last")
-    return combined
+            result = pd.DataFrame()
+        if not result.empty:
+            return result   # Erfolg
+        if _attempt < 3:
+            _time.sleep(3)   # kurz warten, dann nochmal
+    return result
 
 
 # ============================================================
@@ -3850,9 +3877,12 @@ class StatistikTab:
 
         def _worker():
             try:
-                # Drive-Archiv (tägliche Backups seit heute)
+                # Drive-Archiv (tägliche Backups) – wenn leer → Drive-Fehler → Flag setzen
+                drive_ok = False
                 try:
                     normal_arch, express_arch = fetch_dhl_archiv_gdrive()
+                    # Drive hat immer Daten (Backups seit 23.05) – leer = Verbindungsfehler
+                    drive_ok = not normal_arch.empty and not express_arch.empty
                 except Exception:
                     normal_arch, express_arch = pd.DataFrame(), pd.DataFrame()
 
@@ -3870,7 +3900,8 @@ class StatistikTab:
                 # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
                 express_df = apply_dhl_express_korrektur(express_df)
 
-                self.frame.after(0, lambda n=normal_df, e=express_df: self._dhl_on_loaded(n, e))
+                self.frame.after(0, lambda n=normal_df, e=express_df, ok=drive_ok:
+                                 self._dhl_on_loaded(n, e, drive_ok=ok))
             except Exception as ex:
                 self.frame.after(0, lambda err=ex: self._dhl_on_error(err))
 
@@ -4458,14 +4489,16 @@ class StatistikTab:
 
     # ── DHL interne Methoden ─────────────────────────────────────────
 
-    def _dhl_on_loaded(self, normal_df, express_df):
-        self._dhl_loading = False
+    def _dhl_on_loaded(self, normal_df, express_df, drive_ok=True):
+        self._dhl_loading  = False
+        self._dhl_drive_ok = drive_ok   # False = Drive war nicht erreichbar
         self._normal_df  = normal_df  if not normal_df.empty  else None
         self._express_df = express_df if not express_df.empty else None
         n_n = len(normal_df)  if not normal_df.empty  else 0
         n_e = len(express_df) if not express_df.empty else 0
-        self._dhl_status_lbl.config(text=f"✅  {n_n} DHL Normal + {n_e} DHL Express geladen")
-        self._stop_loading_cb(f"DHL geladen: {n_n} Normal + {n_e} Express")
+        warn = "  ⚠ Drive nicht erreichbar – nur NAS" if not drive_ok else ""
+        self._dhl_status_lbl.config(text=f"✅  {n_n} DHL Normal + {n_e} DHL Express geladen{warn}")
+        self._stop_loading_cb(f"DHL geladen: {n_n} Normal + {n_e} Express{warn}")
         self._dhl_recalculate()
         self._try_save_cache_if_ready()
 
@@ -7557,6 +7590,11 @@ class App(tk.Tk):
         self.tab_dhl_merge = DHLMergeTab(self.nb, get_export_folder=lambda: self.export_folder)
         self.nb.add(self.tab_dhl_merge.frame, text="  DHL (heute)  ")
 
+        # 11. Gimli – Sendungssuche (durchsucht geladene DHL-Daten)
+        self.tab_gimli = tk.Frame(self.nb, bg="#f0f2f5")
+        self.nb.add(self.tab_gimli, text="  Sendungssuche  ")
+        self._build_gimli_tab()
+
 
         # ---- Tab-Tooltips
         _TAB_TIPS = {
@@ -8173,6 +8211,172 @@ class App(tk.Tk):
                 lbl.config(bg=SIDE_BG, fg="#8aafc8",
                            font=("Segoe UI", 10))
 
+        # Beim Öffnen der Sendungssuche direkt ins Eingabefeld springen
+        if key == "gimli" and hasattr(self, "_gimli_entry"):
+            self._gimli_entry.focus_set()
+
+    # ------------------------------------------------------------------ Gimli (Sendungssuche)
+    def _build_gimli_tab(self):
+        """Baut die Sendungssuche-Seite (Gimli) auf."""
+        f = self.tab_gimli
+
+        # Titelzeile
+        _hdr = tk.Frame(f, bg="#f0f2f5")
+        _hdr.pack(fill="x", padx=20, pady=(14, 4))
+        tk.Label(_hdr, text="🔍  Sendungssuche", font=("Segoe UI", 14, "bold"),
+                 bg="#f0f2f5", fg="#2c3e50").pack(side="left")
+
+        tk.Label(
+            f,
+            text="Sucht eine Sendungsnummer in allen geladenen DHL-Daten "
+                 "(Express + Normal, inkl. Archiv, Drive und Live-OrcaScan).",
+            font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d",
+            anchor="w", justify="left",
+        ).pack(fill="x", padx=20, pady=(0, 10))
+
+        # Eingabe-Zeile
+        _inp = tk.Frame(f, bg="#f0f2f5")
+        _inp.pack(fill="x", padx=20, pady=(0, 10))
+
+        self._gimli_var = tk.StringVar()
+        self._gimli_entry = tk.Entry(
+            _inp, textvariable=self._gimli_var,
+            font=("Consolas", 12), width=34, relief="solid", bd=1,
+        )
+        self._gimli_entry.pack(side="left", ipady=4)
+        self._gimli_entry.bind("<Return>", lambda e: self._gimli_search())
+
+        tk.Button(
+            _inp, text="🔍  Suchen", command=self._gimli_search,
+            bg="#1a5276", fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+            cursor="hand2", activebackground="#21618c", activeforeground="white",
+            padx=16, pady=5,
+        ).pack(side="left", padx=(8, 0))
+
+        # Status-Zeile
+        self._gimli_status = tk.Label(
+            f, text="", font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d", anchor="w",
+        )
+        self._gimli_status.pack(fill="x", padx=20, pady=(0, 6))
+
+        # Ergebnisbereich
+        self._gimli_result = tk.Frame(f, bg="#f0f2f5")
+        self._gimli_result.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+
+        # Gelesene NAS-Archive im Speicher merken (einmal lesen, dann schnell).
+        # Schlüssel: "DHL Normal" / "DHL Express" → DataFrame
+        self._gimli_cache = {}
+        self._gimli_busy  = False
+
+    def _gimli_search(self):
+        """Durchsucht die NAS-Archive direkt nach der eingegebenen Sendungsnummer.
+
+        Liest die Excel-Dateien wie das eigenständige Skript – aber im
+        Hintergrund (damit die App nicht einfriert) und merkt sich die
+        gelesenen Daten, sodass jede weitere Suche sofort kommt.
+        """
+        if self._gimli_busy:
+            return  # läuft bereits
+
+        # Ergebnisbereich leeren
+        for w in list(self._gimli_result.winfo_children()):
+            w.destroy()
+
+        eingabe = self._gimli_var.get().strip()
+        if not eingabe:
+            self._gimli_status.config(text="Bitte eine Sendungsnummer eingeben.")
+            return
+
+        roh_eingabe = clean_barcode(eingabe)
+        such = roh_eingabe.lstrip("0")
+        if not such:
+            self._gimli_status.config(text="Ungültige Eingabe.")
+            return
+
+        # Typ anhand des Barcode-Anfangs vorbestimmen (durchsucht nur den
+        # passenden Ordner → halbe Datenmenge, schneller):
+        #   "J…"  → DHL Express (Barcode beginnt mit JJD0)
+        #   Ziffer → DHL Normal (Barcode beginnt mit 00)
+        #   sonst  → beide durchsuchen
+        if roh_eingabe[:1].upper() == "J":
+            ordner = [("DHL Express", DHL_NAS_EXPRESS_DIR)]
+        elif roh_eingabe[:1].isdigit():
+            ordner = [("DHL Normal", DHL_NAS_NORMAL_DIR)]
+        else:
+            ordner = [("DHL Normal", DHL_NAS_NORMAL_DIR),
+                      ("DHL Express", DHL_NAS_EXPRESS_DIR)]
+
+        # Muss das Archiv erst gelesen werden? (beim ersten Mal pro Typ)
+        muss_laden = any(typ not in self._gimli_cache for typ, _ in ordner)
+        if muss_laden:
+            self._gimli_status.config(text="🔍  Suche läuft … (Archiv wird einmalig eingelesen)")
+        else:
+            self._gimli_status.config(text="🔍  Suche läuft …")
+
+        self._gimli_busy = True
+
+        def _worker():
+            try:
+                treffer = []
+                for typ, folder in ordner:
+                    df = self._gimli_cache.get(typ)
+                    if df is None:
+                        df = load_dhl_nas_archive(folder)
+                        if df is not None and not df.empty:
+                            self._gimli_cache[typ] = df   # merken
+                    if df is None or df.empty:
+                        continue
+                    bc_col = first_existing(df, ORCA_COL_BARCODE)
+                    sc_col = first_existing(df, ORCA_COL_SCAN)
+                    if not bc_col:
+                        continue
+                    norm = df[bc_col].map(clean_barcode).str.lstrip("0")
+                    mask = norm.str.contains(such, na=False, regex=False)
+                    for idx in df.index[mask]:
+                        roh = clean_barcode(df.at[idx, bc_col])
+                        # Führende 00 ergänzen bei rein numerischen (Normal-)Barcodes
+                        anzeige = "00" + roh if (roh.isdigit() and not roh.startswith("00")) else roh
+                        scan = fmt_dt(df.at[idx, sc_col]) if sc_col else ""
+                        treffer.append((anzeige, typ, scan))
+                self.tab_gimli.after(0, lambda: self._gimli_show_results(eingabe, treffer))
+            except Exception as e:
+                self.tab_gimli.after(0, lambda err=e: self._gimli_show_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _gimli_show_error(self, err):
+        self._gimli_busy = False
+        self._gimli_status.config(text=f"⚠  Fehler bei der Suche: {err}")
+
+    def _gimli_show_results(self, eingabe, treffer):
+        """Zeigt die Suchergebnisse an (läuft im Haupt-Thread)."""
+        self._gimli_busy = False
+
+        for w in list(self._gimli_result.winfo_children()):
+            w.destroy()
+
+        if not treffer:
+            self._gimli_status.config(text=f"❌  Nicht gefunden: {eingabe}")
+            return
+
+        self._gimli_status.config(text=f"✅  {len(treffer)} Treffer für „{eingabe}“")
+
+        # Treffer als Karten anzeigen (max. 50)
+        for anzeige, typ, scan in treffer[:50]:
+            card = tk.Frame(self._gimli_result, bg="white", relief="solid", bd=1)
+            card.pack(fill="x", pady=4)
+            tk.Label(card, text=anzeige, font=("Consolas", 13, "bold"),
+                     bg="white", fg="#1a5276", anchor="w").pack(fill="x", padx=12, pady=(8, 0))
+            info = f"Typ: {typ}        Scan-Datum: {scan or 'unbekannt'}"
+            tk.Label(card, text=info, font=("Segoe UI", 10),
+                     bg="white", fg="#2c3e50", anchor="w").pack(fill="x", padx=12, pady=(0, 8))
+
+        if len(treffer) > 50:
+            tk.Label(self._gimli_result,
+                     text=f"… und {len(treffer) - 50} weitere (nur erste 50 angezeigt).",
+                     font=("Segoe UI", 9, "italic"), bg="#f0f2f5", fg="#7f8c8d",
+                     ).pack(fill="x", pady=(4, 0))
+
     def _build_sidebar_buttons(self):
         """Erstellt die Navigations-Buttons in der Sidebar."""
         SIDE_BG   = "#1a2744"
@@ -8236,6 +8440,11 @@ class App(tk.Tk):
              "DHL Normal Scans von heute\n"
              "(OrcaScan DHL_Normal Sheet).\n"
              "Export als YYMMDD.xlsx möglich."),
+            ("gimli",       "🔍  Sendungssuche",   self.tab_gimli,
+             "Sucht eine DHL-Sendungsnummer in allen\n"
+             "geladenen DHL-Daten (Express + Normal,\n"
+             "inkl. NAS-Archiv, Drive und Live-OrcaScan).\n"
+             "Eingabe mit oder ohne führende 00."),
         ]
 
         INDICATOR   = "#4a9fd4"   # helles Blau – aktiver Markierungsreiter
