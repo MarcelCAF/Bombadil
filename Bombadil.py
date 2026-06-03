@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.68"
+VERSION = "1.0.69"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -742,6 +742,23 @@ def _delete_drive_files_by_name(filename: str, folder_id: str):
                 pass
     except Exception:
         pass
+
+
+def backup_tagesbote_to_gdrive() -> str:
+    """Sichert das Tagesboten-Sheet als täglichen Snapshot auf Google Drive.
+    Format: Tagesbote_Backup_YYYY-MM-DD.xlsx im Ordner 'Tagesbote Upload'.
+    Schützt die Tagesboten-Daten vor OrcaScan-Löschungen."""
+    today_str = date.today().strftime("%Y-%m-%d")
+    filename  = f"Tagesbote_Backup_{today_str}.xlsx"
+    try:
+        df = fetch_sheet_orca(ORCA_TAGESBOTE_SHEET_ID)
+        if df is None or df.empty:
+            return "leer"
+        _delete_drive_files_by_name(filename, GDRIVE_FOLDER_TAGESBOTE)
+        upload_excel_to_gdrive(df, GDRIVE_FOLDER_TAGESBOTE, filename)
+        return f"{len(df)} Einträge"
+    except Exception as e:
+        return f"Fehler: {e}"
 
 
 def backup_dhl_to_gdrive() -> dict:
@@ -9008,6 +9025,10 @@ class App(tk.Tk):
                     backup_dhl_to_gdrive()
                 except Exception as e:
                     print(f"[DHL-Backup] Fehler: {e}")
+                try:
+                    backup_tagesbote_to_gdrive()
+                except Exception as e:
+                    print(f"[Tagesbote-Backup] Fehler: {e}")
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 self.after(0, lambda p=path, d=today_str: self._on_backup_done(p, d, manual))
             except Exception as e:
