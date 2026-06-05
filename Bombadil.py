@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.76"
+VERSION = "1.0.77"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -966,7 +966,10 @@ def fetch_dhl_archiv_gdrive() -> tuple:
         if not frames:
             return pd.DataFrame()
         combined = pd.concat(frames, ignore_index=True)
-        bc = first_existing(combined, COL_BARCODE)
+        # WICHTIG: DHL_COL_BARCODE (kennt "Package Barcode"), NICHT COL_BARCODE.
+        # Sonst wird die Barcode-Spalte nicht gefunden → keine Entdoppelung →
+        # jede kumulative Backup-Datei bläht die Zahlen mehrfach auf.
+        bc = first_existing(combined, DHL_COL_BARCODE)
         if bc:
             combined = combined.drop_duplicates(subset=[bc], keep="last")
         return combined
@@ -975,7 +978,7 @@ def fetch_dhl_archiv_gdrive() -> tuple:
         if a is None or a.empty: return b
         if b is None or b.empty: return a
         comb = pd.concat([a, b], ignore_index=True)
-        bc = first_existing(comb, COL_BARCODE)
+        bc = first_existing(comb, DHL_COL_BARCODE)
         if bc:
             comb = comb.drop_duplicates(subset=[bc], keep="last")
         return comb
@@ -4076,40 +4079,58 @@ class StatistikTab:
         threading.Thread(target=_worker, daemon=True).start()
 
     def load_dhl_async(self):
-        """Lädt DHL-Statistik aus Drive-Archiv + NAS (kein OrcaScan).
-        OrcaScan hatte nur ~5k Live-Einträge; alle historischen Daten
-        liegen im NAS-Archiv. Tägliche Drive-Backups halten es aktuell."""
+        """Lädt DHL-Statistik aus Live-OrcaScan + Drive-Archiv + NAS.
+
+        Live-OrcaScan ist die Hauptquelle für die aktuellen Tage (immer
+        sofort da, dedupliziert, kein Warten aufs 17:00-Backup). Drive-Archiv
+        und NAS liefern die ältere Historie (Tage die in OrcaScan wegen der
+        Zeilenbegrenzung schon gelöscht wurden). Alles wird per Barcode
+        dedupliziert (Live gewinnt)."""
         if self._dhl_loading:
             return
         self._dhl_loading = True
-        self._dhl_status_lbl.config(text="⏳  Lade DHL-Archiv …")
-        self._start_loading_cb("⏳  Lade DHL-Archiv …")
+        self._dhl_status_lbl.config(text="⏳  Lade DHL-Daten …")
+        self._start_loading_cb("⏳  Lade DHL-Daten …")
 
         def _worker():
             try:
-                # Drive-Archiv (tägliche Backups) – wenn leer → Drive-Fehler → Flag setzen
+                # 1. Live-OrcaScan (aktuelle Tage, sauber dedupliziert)
+                try:
+                    normal_live  = fetch_sheet_orca(ORCA_DHL_NORMAL_SHEET_ID,
+                                                    drop_cols={"signature", "packagePhoto"})
+                    express_live = fetch_sheet_orca(ORCA_DHL_EX_SHEET_ID,
+                                                    drop_cols={"signature", "packagePhoto"})
+                except Exception:
+                    normal_live, express_live = pd.DataFrame(), pd.DataFrame()
+
+                # 2. Drive-Archiv (tägliche Backups) – wenn leer → Drive-Fehler
                 drive_ok = False
                 try:
                     normal_arch, express_arch = fetch_dhl_archiv_gdrive()
-                    # Drive hat immer Daten (Backups seit 23.05) – leer = Verbindungsfehler
                     drive_ok = not normal_arch.empty and not express_arch.empty
                 except Exception:
                     normal_arch, express_arch = pd.DataFrame(), pd.DataFrame()
 
-                # NAS-Archiv (alle historischen Daten)
+                # 3. NAS-Archiv (alle historischen Daten)
                 try:
                     normal_nas  = load_dhl_nas_archive(DHL_NAS_NORMAL_DIR)
                     express_nas = load_dhl_nas_archive(DHL_NAS_EXPRESS_DIR)
                 except Exception:
                     normal_nas, express_nas = pd.DataFrame(), pd.DataFrame()
 
-                # Drive + NAS mergen, per Barcode dedupliziert (Drive gewinnt)
-                normal_df  = _merge_live_archiv(normal_arch, normal_nas)
-                express_df = _merge_live_archiv(express_arch, express_nas)
+                # Mergen, per Barcode dedupliziert. Reihenfolge der Sieger:
+                # Live > Drive > NAS (das jeweils erste Argument gewinnt).
+                normal_archiv  = _merge_live_archiv(normal_arch,  normal_nas)
+                express_archiv = _merge_live_archiv(express_arch, express_nas)
+                normal_df  = _merge_live_archiv(normal_live,  normal_archiv)
+                express_df = _merge_live_archiv(express_live, express_archiv)
 
                 # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
                 express_df = apply_dhl_express_korrektur(express_df)
 
+                # drive_ok bleibt für den Cache-Schutz relevant: Live allein
+                # deckt nur die letzten Tage ab; für vollständige Historie muss
+                # auch das Drive-Archiv geladen worden sein.
                 self.frame.after(0, lambda n=normal_df, e=express_df, ok=drive_ok:
                                  self._dhl_on_loaded(n, e, drive_ok=ok))
             except Exception as ex:
