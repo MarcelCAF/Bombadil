@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.78"
+VERSION = "1.0.79"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -475,6 +475,24 @@ def clean_barcode(value) -> str:
     if s.endswith(".0") and s[:-2].lstrip("-").isdigit():
         s = s[:-2]
     return s
+
+
+def _dedup_by_barcode(df, bc_col, keep="last"):
+    """Dedupliziert einen DataFrame per Barcode mit NORMALISIERUNG.
+
+    DHL-Normal-Barcodes kommen in zwei Formaten vor: mit führender '00'
+    (00340…) und ohne (340…) – beides dasselbe Paket. Reines String-Dedup
+    erkennt das nicht und bläht die Statistik auf. Hier wird per
+    clean_barcode + führende Nullen entfernt auf eine kanonische Form
+    normalisiert und darauf dedupliziert. Die Original-Spalte bleibt
+    unverändert (für Anzeige)."""
+    if df is None or getattr(df, "empty", True) or not bc_col or bc_col not in df.columns:
+        return df
+    key = df[bc_col].map(clean_barcode).str.lstrip("0")
+    out = df.assign(_dedupkey=key)
+    out = out[out["_dedupkey"].str.len() > 0]
+    out = out.drop_duplicates(subset=["_dedupkey"], keep=keep).drop(columns="_dedupkey")
+    return out.reset_index(drop=True)
 
 
 # ============================================================
@@ -972,7 +990,7 @@ def fetch_dhl_archiv_gdrive() -> tuple:
         # jede kumulative Backup-Datei bläht die Zahlen mehrfach auf.
         bc = first_existing(combined, DHL_COL_BARCODE)
         if bc:
-            combined = combined.drop_duplicates(subset=[bc], keep="last")
+            combined = _dedup_by_barcode(combined, bc, keep="last")
         return combined
 
     def _merge_two(a, b):
@@ -981,7 +999,7 @@ def fetch_dhl_archiv_gdrive() -> tuple:
         comb = pd.concat([a, b], ignore_index=True)
         bc = first_existing(comb, DHL_COL_BARCODE)
         if bc:
-            comb = comb.drop_duplicates(subset=[bc], keep="last")
+            comb = _dedup_by_barcode(comb, bc, keep="last")
         return comb
 
     # Normal-Archiv aus DHL-Normal-Ordner, Express-Archiv aus EXPRESS-Ordner.
@@ -1016,10 +1034,10 @@ def _merge_live_archiv(live_df, archiv_df):
     bc_col = first_existing(combined, ORCA_COL_BARCODE) or \
              first_existing(combined, COL_BARCODE)
     if bc_col:
-        # Barcode normalisieren bevor wir deduplizieren (string-trim, .0 raus)
-        combined[bc_col] = combined[bc_col].apply(clean_barcode)
-        combined = combined[combined[bc_col].astype(str).str.len() > 0]
-        combined = combined.drop_duplicates(subset=[bc_col], keep="last")
+        # Dedup mit Normalisierung (führende 00 / .0 / Whitespace) – erkennt
+        # '340…' und '00340…' als dasselbe Paket. Live gewinnt (keep="last",
+        # da live_df beim concat hinten steht).
+        combined = _dedup_by_barcode(combined, bc_col, keep="last")
     return combined
 
 
