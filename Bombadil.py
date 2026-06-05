@@ -76,7 +76,7 @@ LOGO_PATH = BASE_DIR / "logo.png"   # optional
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.77"
+VERSION = "1.0.78"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -350,7 +350,8 @@ def _save_tagesbote_cache(rows: list):
 # Fester Backup-Ordner für tägliche Abholer_DB-Sicherungen (NAS, alle PCs)
 BACKUP_DIR               = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv")
 
-# NAS-Archive für historische DHL-Daten (manuell gesicherte Excel-Dateien)
+# Legacy – NAS wird nur noch als Schreib-Ziel für Abholer_DB genutzt.
+# DHL-Lesen läuft vollständig über Drive + Live-OrcaScan (seit v1.0.78).
 DHL_NAS_NORMAL_DIR       = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Normal")
 DHL_NAS_EXPRESS_DIR      = Path(r"W:\Dokumentenaustausch\Tagesskripte\Bombadil\Archiv\DHL Express")
 
@@ -919,7 +920,7 @@ def fetch_dhl_archiv_gdrive() -> tuple:
 
     import re as _re
     from datetime import date as _date
-    cutoff = _date.today().replace(year=_date.today().year - 1)
+    cutoff = _date.today() - timedelta(days=548)   # ~18 Monate (Sicherheitspuffer nach NAS-Ablösung)
     cutoff_str = cutoff.strftime("%Y-%m")
 
     def _load_for_prefix(prefix, folder_id):
@@ -1047,6 +1048,14 @@ DHL_KORREKTUR_VERTEILUNG = {
 # Vergleich gegen Tagesbote-Excel-Listen aus Google Drive (eindeutige
 # Pakete im Tagesbote als "Verpackt" gelistet).
 PU_KORREKTUR_VERPACKT = {
+    # Jan–Mär 2026: Abholer_DB-Daten gingen beim OrcaScan-Crash verloren und
+    # liegen nicht als Drive-Backup vor (älteste Backups ab 23.05.). Die Werte
+    # stammen aus einem früheren Build (DHL-Tab Position PU) als die Daten noch
+    # live waren. Rohdaten sind jetzt 0/1 → Phantome füllen die Lücke, keine
+    # Doppelzählung. So zeigt der PU-Tab dieselben Werte wie der DHL-Tab.
+    "2026-01": 1060,   # Roh 1   + 1060 = 1061
+    "2026-02": 1361,   # Roh 0   + 1361 = 1361
+    "2026-03": 1793,   # Roh 0   + 1793 = 1793
     "2026-04": 1111,   # April 2026: Drive-Tagesbote (2.091) − Bombadil-Verpackt (980)
 }
 
@@ -4111,19 +4120,11 @@ class StatistikTab:
                 except Exception:
                     normal_arch, express_arch = pd.DataFrame(), pd.DataFrame()
 
-                # 3. NAS-Archiv (alle historischen Daten)
-                try:
-                    normal_nas  = load_dhl_nas_archive(DHL_NAS_NORMAL_DIR)
-                    express_nas = load_dhl_nas_archive(DHL_NAS_EXPRESS_DIR)
-                except Exception:
-                    normal_nas, express_nas = pd.DataFrame(), pd.DataFrame()
-
                 # Mergen, per Barcode dedupliziert. Reihenfolge der Sieger:
-                # Live > Drive > NAS (das jeweils erste Argument gewinnt).
-                normal_archiv  = _merge_live_archiv(normal_arch,  normal_nas)
-                express_archiv = _merge_live_archiv(express_arch, express_nas)
-                normal_df  = _merge_live_archiv(normal_live,  normal_archiv)
-                express_df = _merge_live_archiv(express_live, express_archiv)
+                # Live > Drive (NAS entfernt seit v1.0.79 – komplette Historie
+                # ab Dez 2025 wurde nach Drive migriert, siehe nas_to_drive_migration.py).
+                normal_df  = _merge_live_archiv(normal_live,  normal_arch)
+                express_df = _merge_live_archiv(express_live, express_arch)
 
                 # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
                 express_df = apply_dhl_express_korrektur(express_df)
@@ -4844,6 +4845,8 @@ class StatistikTab:
                 _pu_combined = _pu_combined.drop_duplicates(subset=[_pu_bc_col], keep="first")
                 _pu_combined[_pu_vp_col] = pd.to_datetime(
                     _pu_combined[_pu_vp_col], errors="coerce", utc=True).dt.tz_convert(None)
+                # PU-Korrekturen anwenden (Phantom-Pakete für Monate mit Datenverlust)
+                _pu_combined = apply_pu_korrektur(_pu_combined)
         else:
             _pu_combined = None
             _pu_bc_col   = None
@@ -6873,6 +6876,14 @@ class PickupHeuteTab:
             except Exception as e:
                 errors.append(f"Lokal: {e}")
 
+            # ── 3. Google Drive (Tourlisten-Ordner) – Archiv-Kopie ─────
+            # Damit die Tour-Excel auch ohne NAS-Zugriff (andere Standorte)
+            # verfügbar ist – neben den tour_zeiten_*.json im selben Ordner.
+            try:
+                upload_excel_to_gdrive(df, GDRIVE_FOLDER_TOUR_ZEITEN, filename)
+            except Exception as e:
+                errors.append(f"Drive: {e}")
+
             def _done():
                 if saved_paths:
                     txt = f"✅  Tourliste {tour} ({len(tour_rows)} Pakete) → {saved_paths[-1]}"
@@ -7375,7 +7386,7 @@ class PickupHeuteTab:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bombadil")
+        self.title(f"Bombadil  v{VERSION}")
         self.geometry("1260x860")
         self.minsize(1000, 640)
         self.configure(bg="#f0f2f5")
@@ -8010,10 +8021,10 @@ class App(tk.Tk):
         self.tab_dhl_merge = DHLMergeTab(self.nb, get_export_folder=lambda: self.export_folder)
         self.nb.add(self.tab_dhl_merge.frame, text="  DHL (heute)  ")
 
-        # 11. Gimli – Sendungssuche (durchsucht geladene DHL-Daten)
-        self.tab_gimli = tk.Frame(self.nb, bg="#f0f2f5")
-        self.nb.add(self.tab_gimli, text="  Sendungssuche  ")
-        self._build_gimli_tab()
+        # 11. Moria – Sendungssuche (durchsucht geladene DHL-Daten)
+        self.tab_moria = tk.Frame(self.nb, bg="#f0f2f5")
+        self.nb.add(self.tab_moria, text="  Sendungssuche  ")
+        self._build_moria_tab()
 
 
         # ---- Tab-Tooltips
@@ -8632,18 +8643,18 @@ class App(tk.Tk):
                            font=("Segoe UI", 10))
 
         # Beim Öffnen der Sendungssuche direkt ins Eingabefeld springen
-        if key == "gimli" and hasattr(self, "_gimli_entry"):
-            self._gimli_entry.focus_set()
+        if key == "moria" and hasattr(self, "_moria_entry"):
+            self._moria_entry.focus_set()
 
-    # ------------------------------------------------------------------ Gimli (Sendungssuche)
-    def _build_gimli_tab(self):
-        """Baut die Sendungssuche-Seite (Gimli) auf."""
-        f = self.tab_gimli
+    # ------------------------------------------------------------------ Moria (Sendungssuche)
+    def _build_moria_tab(self):
+        """Baut die Sendungssuche-Seite (Moria) auf."""
+        f = self.tab_moria
 
         # Titelzeile
         _hdr = tk.Frame(f, bg="#f0f2f5")
         _hdr.pack(fill="x", padx=20, pady=(14, 4))
-        tk.Label(_hdr, text="🔍  Sendungssuche", font=("Segoe UI", 14, "bold"),
+        tk.Label(_hdr, text="🔍  Moria – Sendungssuche", font=("Segoe UI", 14, "bold"),
                  bg="#f0f2f5", fg="#2c3e50").pack(side="left")
 
         tk.Label(
@@ -8658,59 +8669,59 @@ class App(tk.Tk):
         _inp = tk.Frame(f, bg="#f0f2f5")
         _inp.pack(fill="x", padx=20, pady=(0, 10))
 
-        self._gimli_var = tk.StringVar()
-        self._gimli_entry = tk.Entry(
-            _inp, textvariable=self._gimli_var,
+        self._moria_var = tk.StringVar()
+        self._moria_entry = tk.Entry(
+            _inp, textvariable=self._moria_var,
             font=("Consolas", 12), width=34, relief="solid", bd=1,
         )
-        self._gimli_entry.pack(side="left", ipady=4)
-        self._gimli_entry.bind("<Return>", lambda e: self._gimli_search())
+        self._moria_entry.pack(side="left", ipady=4)
+        self._moria_entry.bind("<Return>", lambda e: self._moria_search())
 
         tk.Button(
-            _inp, text="🔍  Suchen", command=self._gimli_search,
+            _inp, text="🔍  Suchen", command=self._moria_search,
             bg="#1a5276", fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
             cursor="hand2", activebackground="#21618c", activeforeground="white",
             padx=16, pady=5,
         ).pack(side="left", padx=(8, 0))
 
         # Status-Zeile
-        self._gimli_status = tk.Label(
+        self._moria_status = tk.Label(
             f, text="", font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d", anchor="w",
         )
-        self._gimli_status.pack(fill="x", padx=20, pady=(0, 6))
+        self._moria_status.pack(fill="x", padx=20, pady=(0, 6))
 
         # Ergebnisbereich
-        self._gimli_result = tk.Frame(f, bg="#f0f2f5")
-        self._gimli_result.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        self._moria_result = tk.Frame(f, bg="#f0f2f5")
+        self._moria_result.pack(fill="both", expand=True, padx=20, pady=(0, 14))
 
         # Gelesene NAS-Archive im Speicher merken (einmal lesen, dann schnell).
         # Schlüssel: "DHL Normal" / "DHL Express" → DataFrame
-        self._gimli_cache = {}
-        self._gimli_busy  = False
+        self._moria_cache = {}
+        self._moria_busy  = False
 
-    def _gimli_search(self):
-        """Durchsucht NAS-Archiv + Drive-Backups + Live-OrcaScan nach der
+    def _moria_search(self):
+        """Durchsucht Drive-Archiv + Live-OrcaScan nach der
         eingegebenen Sendungsnummer.
 
         Läuft im Hintergrund (damit die App nicht einfriert) und merkt sich
         die gelesenen Daten, sodass jede weitere Suche sofort kommt.
         """
-        if self._gimli_busy:
+        if self._moria_busy:
             return  # läuft bereits
 
         # Ergebnisbereich leeren
-        for w in list(self._gimli_result.winfo_children()):
+        for w in list(self._moria_result.winfo_children()):
             w.destroy()
 
-        eingabe = self._gimli_var.get().strip()
+        eingabe = self._moria_var.get().strip()
         if not eingabe:
-            self._gimli_status.config(text="Bitte eine Sendungsnummer eingeben.")
+            self._moria_status.config(text="Bitte eine Sendungsnummer eingeben.")
             return
 
         roh_eingabe = clean_barcode(eingabe)
         such = roh_eingabe.lstrip("0")
         if not such:
-            self._gimli_status.config(text="Ungültige Eingabe.")
+            self._moria_status.config(text="Ungültige Eingabe.")
             return
 
         # Typ anhand des Barcode-Anfangs vorbestimmen (durchsucht nur den
@@ -8728,22 +8739,22 @@ class App(tk.Tk):
                        ("DHL Express", DHL_NAS_EXPRESS_DIR, ORCA_DHL_EX_SHEET_ID)]
 
         # Muss erst eingelesen werden? (beim ersten Mal)
-        muss_laden = "DRIVE" not in self._gimli_cache or any(
-            f"{typ}|NAS" not in self._gimli_cache for typ, _, _ in quellen)
+        muss_laden = "DRIVE" not in self._moria_cache or any(
+            f"{typ}|NAS" not in self._moria_cache for typ, _, _ in quellen)
         if muss_laden:
-            self._gimli_status.config(
+            self._moria_status.config(
                 text="🔍  Suche läuft … (Archiv + Drive + Live werden einmalig eingelesen)")
         else:
-            self._gimli_status.config(text="🔍  Suche läuft …")
+            self._moria_status.config(text="🔍  Suche läuft …")
 
-        self._gimli_busy = True
+        self._moria_busy = True
 
         def _worker():
             try:
                 treffer = []
                 seen = set()   # dedupliziert gleiche Sendung aus mehreren Quellen
                 for typ, folder, sheet_id in quellen:
-                    for quelle, df in self._gimli_get_sources(typ, folder, sheet_id):
+                    for quelle, df in self._moria_get_sources(typ, folder, sheet_id):
                         if df is None or df.empty:
                             continue
                         bc_col = first_existing(df, ORCA_COL_BARCODE)
@@ -8761,30 +8772,21 @@ class App(tk.Tk):
                             seen.add(anzeige)
                             scan = fmt_dt(df.at[idx, sc_col]) if sc_col else ""
                             treffer.append((anzeige, typ, scan, quelle))
-                self.tab_gimli.after(0, lambda: self._gimli_show_results(eingabe, treffer))
+                self.tab_moria.after(0, lambda: self._moria_show_results(eingabe, treffer))
             except Exception as e:
-                self.tab_gimli.after(0, lambda err=e: self._gimli_show_error(err))
+                self.tab_moria.after(0, lambda err=e: self._moria_show_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _gimli_get_sources(self, typ, folder, sheet_id):
-        """Liefert [(quelle_label, df), ...] für einen DHL-Typ aus 3 Quellen:
-        NAS-Archiv, Drive-Backups und Live-OrcaScan. Alles wird gecacht, sodass
-        weitere Suchen sofort kommen."""
-        cache = self._gimli_cache
+    def _moria_get_sources(self, typ, folder, sheet_id):
+        """Liefert [(quelle_label, df), ...] für einen DHL-Typ aus 2 Quellen:
+        Drive-Archiv und Live-OrcaScan. Alles wird gecacht, sodass
+        weitere Suchen sofort kommen. (NAS entfernt seit v1.0.79 – komplette
+        Historie ab Dez 2025 liegt auf Drive.)"""
+        cache = self._moria_cache
         out = []
 
-        # 1. NAS-Archiv (lange Historie)
-        nas_key = f"{typ}|NAS"
-        if nas_key not in cache:
-            try:
-                cache[nas_key] = load_dhl_nas_archive(folder)
-            except Exception:
-                cache[nas_key] = None
-        if cache.get(nas_key) is not None:
-            out.append(("Archiv", cache[nas_key]))
-
-        # 2. Drive-Backups (letzte Wochen) – liefert beide Typen auf einmal
+        # 1. Drive-Archiv (letzte 18 Monate) – liefert beide Typen auf einmal
         if "DRIVE" not in cache:
             try:
                 n_arch, e_arch = fetch_dhl_archiv_gdrive()
@@ -8808,26 +8810,26 @@ class App(tk.Tk):
 
         return out
 
-    def _gimli_show_error(self, err):
-        self._gimli_busy = False
-        self._gimli_status.config(text=f"⚠  Fehler bei der Suche: {err}")
+    def _moria_show_error(self, err):
+        self._moria_busy = False
+        self._moria_status.config(text=f"⚠  Fehler bei der Suche: {err}")
 
-    def _gimli_show_results(self, eingabe, treffer):
+    def _moria_show_results(self, eingabe, treffer):
         """Zeigt die Suchergebnisse an (läuft im Haupt-Thread)."""
-        self._gimli_busy = False
+        self._moria_busy = False
 
-        for w in list(self._gimli_result.winfo_children()):
+        for w in list(self._moria_result.winfo_children()):
             w.destroy()
 
         if not treffer:
-            self._gimli_status.config(text=f"❌  Nicht gefunden: {eingabe}")
+            self._moria_status.config(text=f"❌  Nicht gefunden: {eingabe}")
             return
 
-        self._gimli_status.config(text=f"✅  {len(treffer)} Treffer für „{eingabe}“")
+        self._moria_status.config(text=f"✅  {len(treffer)} Treffer für „{eingabe}“")
 
         # Treffer als Karten anzeigen (max. 50)
         for anzeige, typ, scan, quelle in treffer[:50]:
-            card = tk.Frame(self._gimli_result, bg="white", relief="solid", bd=1)
+            card = tk.Frame(self._moria_result, bg="white", relief="solid", bd=1)
             card.pack(fill="x", pady=4)
             tk.Label(card, text=anzeige, font=("Consolas", 13, "bold"),
                      bg="white", fg="#1a5276", anchor="w").pack(fill="x", padx=12, pady=(8, 0))
@@ -8836,7 +8838,7 @@ class App(tk.Tk):
                      bg="white", fg="#2c3e50", anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
         if len(treffer) > 50:
-            tk.Label(self._gimli_result,
+            tk.Label(self._moria_result,
                      text=f"… und {len(treffer) - 50} weitere (nur erste 50 angezeigt).",
                      font=("Segoe UI", 9, "italic"), bg="#f0f2f5", fg="#7f8c8d",
                      ).pack(fill="x", pady=(4, 0))
@@ -8904,7 +8906,7 @@ class App(tk.Tk):
              "DHL Normal Scans von heute\n"
              "(OrcaScan DHL_Normal Sheet).\n"
              "Export als YYMMDD.xlsx möglich."),
-            ("gimli",       "🔍  Sendungssuche",   self.tab_gimli,
+            ("moria",       "🔍  Sendungssuche",   self.tab_moria,
              "Sucht eine DHL-Sendungsnummer in allen\n"
              "geladenen DHL-Daten (Express + Normal,\n"
              "inkl. NAS-Archiv, Drive und Live-OrcaScan).\n"
@@ -9489,7 +9491,7 @@ class App(tk.Tk):
                                        + self._n_pu_heute)
         self._update_tiles(report_data)
         self._refresh_unstimmigkeiten()
-        self.title(f"Bombadil  –  {label}")
+        self.title(f"Bombadil  v{VERSION}")
         self._stop_loading(f"Geladen: {label}")
         import time as _time
         self._last_load_time = _time.time()
