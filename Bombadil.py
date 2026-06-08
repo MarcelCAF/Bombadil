@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.82"
+VERSION = "1.0.83"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4144,7 +4144,19 @@ class StatistikTab:
             pu_tiles, dhl_tiles, heute=heute,
         )
         def _worker():
-            save_statistik_cache(cache)
+            import datetime as _dt
+            try:
+                save_statistik_cache(cache)
+                uhrzeit = _dt.datetime.now().strftime("%H:%M")
+                self.frame.after(0, lambda t=uhrzeit: (
+                    self._pu_status_lbl.config(text=f"✅  Cache hochgeladen ({t})"),
+                    self._dhl_status_lbl.config(text=f"✅  Cache hochgeladen ({t})")
+                ))
+            except Exception as e:
+                self.frame.after(0, lambda err=e: (
+                    self._pu_status_lbl.config(text=f"❌  Cache-Upload fehlgeschlagen: {err}"),
+                    self._dhl_status_lbl.config(text=f"❌  Cache-Upload fehlgeschlagen: {err}")
+                ))
         threading.Thread(target=_worker, daemon=True).start()
 
     def load_archive_async(self):
