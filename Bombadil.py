@@ -73,10 +73,16 @@ BASE_DIR      = Path(__file__).resolve().parent
 SETTINGS_FILE = BASE_DIR / "settings.json"
 LOGO_PATH = BASE_DIR / "logo.png"   # optional
 
+# Unterordner für JSON-Dateien (hält den Hauptordner schlank, seit v1.0.80).
+# Lese-Funktionen durchsuchen BEIDE Orte (Unterordner + Hauptordner-Fallback),
+# damit ältere Bombadil-Versionen (Kollegen) kompatibel bleiben.
+TOUR_ZEITEN_DIR     = BASE_DIR / "tour_zeiten"
+TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
+
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.79"
+VERSION = "1.0.80"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -118,7 +124,13 @@ def check_for_update():
 
     # Neue Datei herunterladen
     eigene_datei = Path(__file__).resolve()
-    backup_datei = eigene_datei.with_suffix(f".backup_{VERSION}.py")
+    # Backup in Unterordner _alte_versionen/ (hält den Hauptordner schlank, seit v1.0.80)
+    backup_dir = eigene_datei.parent / "_alte_versionen"
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        backup_dir = eigene_datei.parent   # Fallback: Hauptordner
+    backup_datei = backup_dir / f"Bombadil.backup_{VERSION}.py"
     try:
         shutil.copy2(eigene_datei, backup_datei)
         with urllib.request.urlopen(f"{GITHUB_RAW}/Bombadil.py", timeout=15) as r:
@@ -217,18 +229,27 @@ TOUR_2_ABFAHRT = (13, 45)   # nur informativ
 import json as _json_mod
 
 def _tour_zeiten_pfad():
+    """Schreib-Pfad für heute: Unterordner tour_zeiten/."""
     import datetime as _dt_tz
     heute = (_dt_tz.datetime.now()).strftime("%Y-%m-%d")
-    return BASE_DIR / f"tour_zeiten_{heute}.json"
-
-def _load_tour_zeiten() -> dict:
-    """Gibt {"t1": "HH:MM"|None, "t2": "HH:MM"|None} für den heutigen Tag zurück."""
     try:
-        p = _tour_zeiten_pfad()
-        if p.exists():
-            return _json_mod.loads(p.read_text(encoding="utf-8"))
+        TOUR_ZEITEN_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+    return TOUR_ZEITEN_DIR / f"tour_zeiten_{heute}.json"
+
+def _load_tour_zeiten() -> dict:
+    """Gibt {"t1": "HH:MM"|None, "t2": "HH:MM"|None} für den heutigen Tag zurück.
+    Liest aus Unterordner; Fallback auf Hauptordner (Alt-Dateien)."""
+    import datetime as _dt_tz
+    heute = (_dt_tz.datetime.now()).strftime("%Y-%m-%d")
+    for p in (TOUR_ZEITEN_DIR / f"tour_zeiten_{heute}.json",
+              BASE_DIR / f"tour_zeiten_{heute}.json"):
+        try:
+            if p.exists():
+                return _json_mod.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return {"t1": None, "t2": None}
 
 def _pc_name() -> str:
@@ -257,28 +278,31 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None,
         pass
 
 def _load_tour_barcodes_archive() -> dict:
-    """Liest alle tour_zeiten_*.json Dateien im Bombadil-Ordner.
+    """Liest alle tour_zeiten_*.json aus Unterordner UND Hauptordner (Alt-Dateien).
     Gibt {date: set_of_barcodes} zurück – für historische Rekonstruktion
     wenn Abholer_DB-Daten fehlen (z.B. nach OrcaScan-Löschung)."""
     from datetime import date as _date_cls
     result = {}
-    try:
-        for p in BASE_DIR.glob("tour_zeiten_*.json"):
-            try:
-                date_str = p.stem.replace("tour_zeiten_", "")
-                d = _date_cls.fromisoformat(date_str)
-                data = _json_mod.loads(p.read_text(encoding="utf-8"))
-                bcs = set()
-                for key in ("t1_barcodes", "t2_barcodes"):
-                    for bc in (data.get(key) or []):
-                        bc = str(bc).strip()
-                        if bc:
-                            bcs.add(bc)
-                result[d] = bcs
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Beide Orte: Unterordner (neu) + Hauptordner (Alt-Dateien). Bei gleichem
+    # Datum gewinnt der zuletzt gelesene – Unterordner zuletzt (aktueller).
+    for basis in (BASE_DIR, TOUR_ZEITEN_DIR):
+        try:
+            for p in basis.glob("tour_zeiten_*.json"):
+                try:
+                    date_str = p.stem.replace("tour_zeiten_", "")
+                    d = _date_cls.fromisoformat(date_str)
+                    data = _json_mod.loads(p.read_text(encoding="utf-8"))
+                    bcs = set()
+                    for key in ("t1_barcodes", "t2_barcodes"):
+                        for bc in (data.get(key) or []):
+                            bc = str(bc).strip()
+                            if bc:
+                                bcs.add(bc)
+                    result[d] = bcs
+                except Exception:
+                    pass
+        except Exception:
+            pass
     return result
 
 # ── Monatsziele (PU + DHL Statistik) – pro Monat individuell ───────────────
@@ -323,19 +347,28 @@ def _save_monthly_goal(month_key: str, value: int, category: str = "pu"):
 
 # ── Tagesbote-Cache (für nachmittägliche Säuberung des OrcaScan-Sheets) ─────
 def _tagesbote_cache_pfad():
-    """Pro-Tag-Cache der PU-heute-Rows. Reset automatisch um Mitternacht."""
+    """Pro-Tag-Cache der PU-heute-Rows. Reset automatisch um Mitternacht.
+    Schreibt in Unterordner tagesbote_cache/."""
     import datetime as _dt_tb
     heute = (_dt_tb.datetime.now()).strftime("%Y-%m-%d")
-    return BASE_DIR / f"tagesbote_cache_{heute}.json"
-
-def _load_tagesbote_cache() -> list:
-    """Letzter bekannter Tagesbote-Snapshot des heutigen Tages. Leer wenn keiner."""
     try:
-        p = _tagesbote_cache_pfad()
-        if p.exists():
-            return _json_mod.loads(p.read_text(encoding="utf-8"))
+        TAGESBOTE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+    return TAGESBOTE_CACHE_DIR / f"tagesbote_cache_{heute}.json"
+
+def _load_tagesbote_cache() -> list:
+    """Letzter bekannter Tagesbote-Snapshot des heutigen Tages. Leer wenn keiner.
+    Liest aus Unterordner; Fallback auf Hauptordner (Alt-Dateien)."""
+    import datetime as _dt_tb
+    heute = (_dt_tb.datetime.now()).strftime("%Y-%m-%d")
+    for p in (TAGESBOTE_CACHE_DIR / f"tagesbote_cache_{heute}.json",
+              BASE_DIR / f"tagesbote_cache_{heute}.json"):
+        try:
+            if p.exists():
+                return _json_mod.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return []
 
 def _save_tagesbote_cache(rows: list):
@@ -1066,14 +1099,9 @@ DHL_KORREKTUR_VERTEILUNG = {
 # Vergleich gegen Tagesbote-Excel-Listen aus Google Drive (eindeutige
 # Pakete im Tagesbote als "Verpackt" gelistet).
 PU_KORREKTUR_VERPACKT = {
-    # Jan–Mär 2026: Abholer_DB-Daten gingen beim OrcaScan-Crash verloren und
-    # liegen nicht als Drive-Backup vor (älteste Backups ab 23.05.). Die Werte
-    # stammen aus einem früheren Build (DHL-Tab Position PU) als die Daten noch
-    # live waren. Rohdaten sind jetzt 0/1 → Phantome füllen die Lücke, keine
-    # Doppelzählung. So zeigt der PU-Tab dieselben Werte wie der DHL-Tab.
-    "2026-01": 1060,   # Roh 1   + 1060 = 1061
-    "2026-02": 1361,   # Roh 0   + 1361 = 1361
-    "2026-03": 1793,   # Roh 0   + 1793 = 1793
+    # Jan–Mär 2026 ENTFERNT (2026-06-08): Die echten Verpackt_At-Daten liegen
+    # vollständig in den Drive Abholer_DB_Archiv-Dateien (Jan 1060, Feb 1349,
+    # Mär 1787). Die früheren Phantome verdoppelten die Werte. Keine Korrektur nötig.
     "2026-04": 1111,   # April 2026: Drive-Tagesbote (2.091) − Bombadil-Verpackt (980)
 }
 
@@ -3544,6 +3572,7 @@ class StatistikTab:
         self._dhl_daily_data:   list = []
         self._dhl_view_mode = tk.StringVar(value="weekly")
         self._dhl_loading   = False
+        self._dhl_loaded_date = None   # Datum des letzten DHL-Loads (gegen Einfrieren bei Dauerbetrieb)
 
         # ── Scrollbarer Container (geteilt) ──────────────────────────
         self.frame = tk.Frame(parent, bg=self._COL_BG)
@@ -3918,9 +3947,13 @@ class StatistikTab:
             return
         self._main_df = df.copy() if df is not None else None
         self._pu_recalculate()
-        # DHL-Statistik neu berechnen, falls DHL-Daten schon geladen sind
-        # (kann vorkommen wenn Abholer_DB später fertig ist als DHL-Daten)
-        if self._normal_df is not None or self._express_df is not None:
+        # DHL-Daten einmal pro Tag frisch laden – sonst friert der DHL-Stand
+        # ein, wenn der Master-PC tagelang durchläuft (load_dhl_async lief sonst
+        # nur beim Programmstart, Auto-Refresh aktualisierte nur PU).
+        if self._dhl_loaded_date != date.today() and not self._dhl_loading:
+            self.load_dhl_async()
+        elif self._normal_df is not None or self._express_df is not None:
+            # DHL heute schon geladen → nur neu berechnen (z.B. PU-Spalte im Chart)
             self._dhl_recalculate()
         # Cache nach jedem Refresh aktualisieren, damit alle PCs (und später
         # das Handy) tagsüber frisch bleiben (nur wenn DHL-Daten vorhanden).
@@ -3943,6 +3976,17 @@ class StatistikTab:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _dhl_cache_enthaelt_heute(self, cache) -> bool:
+        """True wenn der DHL-Teil des Caches einen daily-Eintrag für HEUTE hat.
+        Schützt davor, dass ein eingefrorener alter DHL-Stand (Master läuft tagelang
+        durch, DHL wird nur beim Start geladen) dauerhaft angezeigt wird."""
+        try:
+            heute = datetime.now().strftime("%d.%m.")
+            daily = cache.get("dhl", {}).get("daily", [])
+            return any(str(r[0]) == heute for r in daily)
+        except Exception:
+            return False
+
     def _on_cache_loaded(self, cache):
         """Wird aufgerufen wenn der Cache-Download fertig ist."""
         # ── Kollegen-PCs (nicht Master): NUR den Master-Cache anzeigen ──
@@ -3964,10 +4008,18 @@ class StatistikTab:
         if cache:
             self._apply_cache(cache)
             dhl_ok = bool(cache.get("dhl", {}).get("weekly"))
-            if statistik_cache_is_fresh(cache) and dhl_ok:
-                # Cache von heute UND vollständig → fertig, kein weiteres Laden nötig
+            dhl_aktuell = self._dhl_cache_enthaelt_heute(cache)
+            if statistik_cache_is_fresh(cache) and dhl_ok and dhl_aktuell:
+                # Cache von heute UND DHL enthält heutigen Tag → fertig
                 self._pu_status_lbl.config(text="✅  Cache aktuell (heute)")
                 self._dhl_status_lbl.config(text="✅  Cache aktuell (heute)")
+                return
+            elif statistik_cache_is_fresh(cache) and dhl_ok and not dhl_aktuell:
+                # Cache-Datum frisch, aber DHL-Teil veraltet (Master lief durch,
+                # DHL seit Tagen nicht neu geladen) → DHL neu laden.
+                self._pu_status_lbl.config(text="✅  Cache aktuell (heute)")
+                self._dhl_status_lbl.config(text="⏳  DHL veraltet – lade neu …")
+                self.load_dhl_async()
                 return
             elif statistik_cache_is_fresh(cache) and not dhl_ok:
                 # Cache frisch, aber DHL-Daten fehlen (z.B. nach Timeout) → DHL nachladen
@@ -4753,6 +4805,7 @@ class StatistikTab:
     def _dhl_on_loaded(self, normal_df, express_df, drive_ok=True):
         self._dhl_loading  = False
         self._dhl_drive_ok = drive_ok   # False = Drive war nicht erreichbar
+        self._dhl_loaded_date = date.today()   # Tagesstempel: heute wurde DHL geladen
         self._normal_df  = normal_df  if not normal_df.empty  else None
         self._express_df = express_df if not express_df.empty else None
         n_n = len(normal_df)  if not normal_df.empty  else 0
