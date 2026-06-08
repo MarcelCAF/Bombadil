@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.81"
+VERSION = "1.0.82"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4105,6 +4105,13 @@ class StatistikTab:
             # Der alte (gute) Cache bleibt erhalten, statt mit Lücken überschrieben.
             self._dhl_status_lbl.config(
                 text="⚠  Drive-Archiv unvollständig – Cache NICHT aktualisiert")
+            return
+        if self._archiv_df is None:
+            # PU-Archiv (Drive Abholer_DB-Backups/Archive) wurde NICHT geladen
+            # → historische Monate fielen auf die Live-Reste (1/0/0). So einen
+            # Cache NICHT speichern, sonst überschreibt er die guten Werte.
+            self._pu_status_lbl.config(
+                text="⚠  PU-Archiv unvollständig – Cache NICHT aktualisiert")
             return
         self._save_cache_async()
 
