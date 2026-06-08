@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.84"
+VERSION = "1.0.85"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -1103,6 +1103,17 @@ PU_KORREKTUR_VERPACKT = {
     # vollständig in den Drive Abholer_DB_Archiv-Dateien (Jan 1060, Feb 1349,
     # Mär 1787). Die früheren Phantome verdoppelten die Werte. Keine Korrektur nötig.
     "2026-04": 1111,   # April 2026: Drive-Tagesbote (2.091) − Bombadil-Verpackt (980)
+}
+
+# FESTE Monatswerte für ABGESCHLOSSENE Monate (PU-Lieferungen / DHL-Pickup).
+# Diese Monate ändern sich nie mehr. Statt sie bei jedem Build aus dem Drive-
+# Archiv neu zu berechnen (was bei Drive-Timing-Problemen auf die Live-Reste
+# 1/0/0 fällt), werden sie HART gesetzt. Kugelsicher gegen Lade-Schwankungen.
+# Werte aus den vollständigen Drive Abholer_DB_Archiv-Dateien (dedupliziert).
+PU_MONATS_FEST = {
+    "2026-01": 1060,
+    "2026-02": 1349,
+    "2026-03": 1787,
 }
 
 
@@ -4453,6 +4464,9 @@ class StatistikTab:
             key_m   = ms.strftime("%Y-%m")    # z.B. "2026-03" → für Ziele
             na_m = count_anlief_in_range(ms, me)
             nb_m = count_abhol_in_range(ms, me)
+            # Abgeschlossene Monate: festen Wert nutzen (gegen Lade-Schwankungen)
+            if key_m in PU_MONATS_FEST:
+                na_m = PU_MONATS_FEST[key_m]
             monthly.append((label_m, na_m, nb_m, key_m))
 
         self._pu_monthly_data = monthly
@@ -5022,13 +5036,18 @@ class StatistikTab:
             ms = today.replace(year=m_year, month=m_month, day=1)
             me = ms.replace(month=ms.month + 1, day=1) if ms.month < 12 \
                  else ms.replace(year=ms.year + 1, month=1, day=1)
+            mkey = ms.strftime("%Y-%m")
+            pu_m = count_pu_in_range(ms, me)
+            # Abgeschlossene Monate: festen Pickup-Wert nutzen (= PU-Tab)
+            if mkey in PU_MONATS_FEST:
+                pu_m = PU_MONATS_FEST[mkey]
             monthly.append((ms.strftime("%b %y"),
                             count(normal_dates,   ms, me),
                             count(express_dates,  ms, me),
-                            count_pu_in_range(ms, me),
+                            pu_m,
                             count_sameday_in_range(ms, me),
                             count_nextday_in_range(ms, me),
-                            ms.strftime("%Y-%m")))    # Monatsschlüssel für Ziele
+                            mkey))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
         # Zähl-Bausteine für die freie Zeitraum-Ansicht speichern (Closures
