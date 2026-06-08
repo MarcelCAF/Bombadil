@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.80"
+VERSION = "1.0.81"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -6460,6 +6460,16 @@ class PickupHeuteTab:
                 command=lambda: self._delete_from_db(action_rows)
             )
 
+        # ── Nur aus Tagesboten-Sheet löschen (wenn im Tagesboten vorhanden) ──
+        if r.get("_tb_row_id"):
+            tb_rows = [x for x in action_rows if x.get("_tb_row_id")]
+            n_tb = len(tb_rows)
+            tbsfx = f" ({n_tb})" if n_tb > 1 else ""
+            menu.add_command(
+                label=f"🗑️  Aus Tagesboten löschen{tbsfx}",
+                command=lambda: self._delete_from_tagesbote(tb_rows)
+            )
+
         # ── In Abholer_DB übertragen (nur wenn nicht in DB) ────────────
         if r.get("_tb_row_id") and not r.get("_db_id"):
             if menu.index("end") is not None:
@@ -6709,6 +6719,61 @@ class PickupHeuteTab:
                 fg="#27ae60")
             self._force_reload_abholer = True
             self._run()
+
+        _thr.Thread(target=_worker, daemon=True).start()
+
+    def _delete_from_tagesbote(self, rows):
+        """Eine oder mehrere Zeilen NUR aus dem Tagesboten-Sheet löschen
+        (Abholer_DB bleibt unangetastet)."""
+        import threading as _thr
+        from tkinter import messagebox
+        if not isinstance(rows, list):
+            rows = [rows]
+        rows = [r for r in rows if r.get("_tb_row_id")]
+        if not rows:
+            return
+        n = len(rows)
+        if n == 1:
+            r = rows[0]
+            frage = (f"Paket '{r['barcode']}' ({r.get('name','')}) wirklich aus dem "
+                     f"Tagesboten-Sheet löschen?\n\n(Abholer_DB bleibt unverändert.)")
+        else:
+            frage = (f"{n} Pakete wirklich aus dem Tagesboten-Sheet löschen?\n\n"
+                     f"(Abholer_DB bleibt unverändert.)")
+        if not messagebox.askyesno("Aus Tagesboten löschen", frage):
+            return
+
+        self.status_lbl.config(text=f"⏳  Lösche {n} aus Tagesboten …", fg="#e67e22")
+
+        def _worker():
+            errors = []
+            tb_ids = [r["_tb_row_id"] for r in rows if r.get("_tb_row_id")]
+            if tb_ids:
+                res = delete_rows_orca_bulk(tb_ids, sheet_id=ORCA_TAGESBOTE_SHEET_ID)
+                if res.get("failed"):
+                    err = res.get("errors", [""])[0] if res.get("errors") else "Fehler"
+                    errors.append(f"Tagesbote: {len(res['failed'])} Fehler – {str(err)[:50]}")
+            self.frame.after(0, lambda: _done(errors))
+
+        def _done(errors):
+            if errors:
+                self.status_lbl.config(text=f"❌  Fehler: {' | '.join(errors)}", fg="#c0392b")
+            else:
+                # Nur Tagesboten-Bezug entfernen; Pakete die auch in Abholer_DB
+                # sind bleiben in der Liste (ohne Tagesboten-Verknüpfung).
+                del_tb_ids = {r.get("_tb_row_id") for r in rows}
+                neu = []
+                for row in self._all_rows:
+                    if row.get("_tb_row_id") in del_tb_ids:
+                        if row.get("_db_id"):
+                            row = dict(row); row["_tb_row_id"] = None
+                            neu.append(row)
+                        # nicht in DB → ganz raus (nur Tagesboten-Eintrag)
+                    else:
+                        neu.append(row)
+                self._all_rows = neu
+                self._refresh_ui()
+                self.status_lbl.config(text=f"✓  {n} aus Tagesboten gelöscht", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
