@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.85"
+VERSION = "1.0.86"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -262,7 +262,7 @@ def _pc_name() -> str:
 
 
 def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None,
-                      t1_set_by=None, t2_set_by=None):
+                      t1_set_by=None, t2_set_by=None, tour_override=None):
     try:
         tz = _load_tour_zeiten()
         _tour_zeiten_pfad().write_text(
@@ -273,6 +273,8 @@ def _save_tour_zeiten(t1, t2, t1_barcodes=None, t2_barcodes=None,
                 # Wer hat gestempelt? (PC-Name, seit v1.0.60)
                 "t1_set_by": t1_set_by if t1_set_by is not None else tz.get("t1_set_by"),
                 "t2_set_by": t2_set_by if t2_set_by is not None else tz.get("t2_set_by"),
+                # Manuelle Tour-Übersteuerung {barcode: "T1"/"T2"/"-"} (seit v1.0.86)
+                "tour_override": tour_override if tour_override is not None else tz.get("tour_override", {}),
             }), encoding="utf-8")
     except Exception:
         pass
@@ -6520,6 +6522,20 @@ class PickupHeuteTab:
                 command=lambda: self._transfer_to_abholer_db(transfer_rows)
             )
 
+        # ── Tour manuell setzen (nur als Korrektur, wenn bereits gestempelt) ──
+        _tz = _load_tour_zeiten()
+        if _tz.get("t1") or _tz.get("t2"):
+            menu.add_separator()
+            menu.add_command(
+                label=f"🚐  Tour 1{suffix}",
+                command=lambda: self._set_tour_for_rows(action_rows, "T1"))
+            menu.add_command(
+                label=f"🚚  Tour 2{suffix}",
+                command=lambda: self._set_tour_for_rows(action_rows, "T2"))
+            menu.add_command(
+                label=f"❌  Tour entfernen{suffix}",
+                command=lambda: self._set_tour_for_rows(action_rows, "-"))
+
         if menu.index("end") is None:
             return   # leeres Menü → nicht anzeigen
 
@@ -6966,15 +6982,43 @@ class PickupHeuteTab:
         self._upload_tourliste("T2")
         self._upload_tour_zeiten_to_drive()
 
+    def _set_tour_for_rows(self, rows, ziel):
+        """Setzt manuell die Tour für eine/mehrere Zeilen (Korrektur).
+        ziel: "T1" / "T2" / "-" (= keine Tour). Override hat Vorrang vor der
+        Auto-Logik. Danach werden BEIDE Tour-Excels neu geschrieben (NAS+lokal+Drive)
+        und der Override an andere PCs gesynct."""
+        rows = [r for r in (rows or []) if r.get("barcode")]
+        if not rows:
+            return
+        tz = _load_tour_zeiten()
+        override = dict(tz.get("tour_override") or {})
+        for r in rows:
+            override[r["barcode"]] = ziel
+        _save_tour_zeiten(t1=tz.get("t1"), t2=tz.get("t2"),
+                          t1_barcodes=tz.get("t1_barcodes"),
+                          tour_override=override, t1_set_by=_pc_name())
+        self._recompute_tours_local()      # Anzeige sofort aktualisieren
+        self._upload_tourliste("T1")       # beide Excels neu (NAS+lokal+Drive)
+        self._upload_tourliste("T2")
+        self._upload_tour_zeiten_to_drive()  # Override an Kollegen-PCs syncen
+        ziel_txt = "keine Tour" if ziel == "-" else ziel
+        self.status_lbl.config(
+            text=f"✓  {len(rows)} Paket(e) → {ziel_txt}", fg="#27ae60")
+
     def _upload_tourliste(self, tour: str):
         import datetime as _dt, pandas as _pd
         rows_all = getattr(self, "_all_rows", [])
         tour_rows = [r for r in rows_all if r.get("tour") == tour]
-        if not tour_rows:
-            return
+        # Hinweis: KEIN früher Abbruch bei leerer Liste – sonst bliebe nach dem
+        # Entfernen der letzten Zeile die alte Excel stehen. Stattdessen wird
+        # eine leere Datei (nur Kopfzeile) geschrieben.
         def _last4(v):
             s = str(v).strip()
             return s[-4:] if len(s) >= 4 else s
+        _spalten = ["Paket-Barcode", "Bestellnummer", "Datum", "Vorname", "Name",
+                    "Ziel-Kiosk", "Status", "Bestellwert", "Versicher.", "Email",
+                    "Lieferung-Adresse", "Lieferung", "Notizen", "Kontrollstatus",
+                    "Zahlung", "Rezept"]
         df = _pd.DataFrame([{
             "Paket-Barcode":     r["barcode"],
             "Bestellnummer":     _last4(r["barcode"]),
@@ -6992,7 +7036,7 @@ class PickupHeuteTab:
             "Kontrollstatus":    r["tb_status"],
             "Zahlung":           "",
             "Rezept":            "",
-        } for r in tour_rows])
+        } for r in tour_rows], columns=_spalten)
         heute = (_dt.datetime.now()).strftime("%d.%m.%Y")
         tour_suffix = "A" if tour == "T1" else "B"
         filename = f"Orca_Abholer_{heute}{tour_suffix}.xlsx"
@@ -7130,10 +7174,13 @@ class PickupHeuteTab:
                     return
                 if not remote.get("t1") and not remote.get("t2"):
                     return
-                # Remote-Daten immer anwenden (ueberschreiben lokale)
+                # Remote-Daten immer anwenden (ueberschreiben lokale) – inkl.
+                # manueller Tour-Übersteuerung (tour_override), damit Korrekturen
+                # eines PCs bei allen ankommen.
                 _save_tour_zeiten(
                     remote.get("t1"), remote.get("t2"),
                     remote.get("t1_barcodes", []), remote.get("t2_barcodes", []),
+                    tour_override=remote.get("tour_override", {}),
                 )
                 self.frame.after(0, self._restore_tour_buttons)
                 self.frame.after(0, self._recompute_tours_local)
@@ -7155,11 +7202,16 @@ class PickupHeuteTab:
         tz       = _load_tour_zeiten()
         t1_bc    = set(tz.get("t1_barcodes") or [])
         t2_gesetzt = bool(tz.get("t2"))
+        override = tz.get("tour_override") or {}   # {barcode: "T1"/"T2"/"-"} manuell
 
         for r in self._all_rows:
             bc = r["barcode"]
             status = r.get("tb_status", "").lower()
-            if status == "offen":
+            if bc in override:
+                # Manuelle Übersteuerung hat Vorrang vor der Auto-Logik
+                ov = override[bc]
+                r["tour"] = "" if ov == "-" else ov
+            elif status == "offen":
                 r["tour"] = ""
             elif bc in t1_bc:
                 r["tour"] = "T1"
@@ -8196,8 +8248,13 @@ class App(tk.Tk):
 
         # 11. Moria – Sendungssuche (durchsucht geladene DHL-Daten)
         self.tab_moria = tk.Frame(self.nb, bg="#f0f2f5")
-        self.nb.add(self.tab_moria, text="  Sendungssuche  ")
+        self.nb.add(self.tab_moria, text="  DHL Sendungssuche  ")
         self._build_moria_tab()
+
+        # 12. Legolas – PU (Pickup-Verfolgung, durchsucht Abholer_DB live + Archiv)
+        self.tab_pickup = tk.Frame(self.nb, bg="#f0f2f5")
+        self.nb.add(self.tab_pickup, text="  PU Sendungssuche  ")
+        self._build_pickup_tab()
 
 
         # ---- Tab-Tooltips
@@ -8361,12 +8418,15 @@ class App(tk.Tk):
         self._select_tab(self.report_tab, "report")
 
         # Beim Start automatisch OrcaScan + DHL laden + Auto-Refresh aktivieren
+        self._show_loading_overlay("Bombadil lädt die Daten")   # gut sichtbarer Lade-Hinweis
         self.after(200,    self.load_main_orca)
         self.after(400,    self.load_dhl_orca)
         self.after(600,    self.toggle_refresh)
         self.after(800,    self.toggle_dhl_refresh)
         self.after(3_000,  self.tab_statistik.load_cache_async)     # Cache zuerst, dann frische Daten
         self.after(60_000, self._check_stale)  # Stale-Data Indikator starten
+        # Sicherheits-Timeout: Overlay spätestens nach 90s ausblenden (falls etwas hängt)
+        self.after(90_000, self._hide_loading_overlay)
 
     # ------------------------------------------------------------------ helpers
 
@@ -8818,6 +8878,9 @@ class App(tk.Tk):
         # Beim Öffnen der Sendungssuche direkt ins Eingabefeld springen
         if key == "moria" and hasattr(self, "_moria_entry"):
             self._moria_entry.focus_set()
+        # Pickup-Verfolgung ebenso
+        if key == "pickup" and hasattr(self, "_pu_track_entry"):
+            self._pu_track_entry.focus_set()
 
     # ------------------------------------------------------------------ Moria (Sendungssuche)
     def _build_moria_tab(self):
@@ -8827,7 +8890,7 @@ class App(tk.Tk):
         # Titelzeile
         _hdr = tk.Frame(f, bg="#f0f2f5")
         _hdr.pack(fill="x", padx=20, pady=(14, 4))
-        tk.Label(_hdr, text="🔍  Moria – Sendungssuche", font=("Segoe UI", 14, "bold"),
+        tk.Label(_hdr, text="🔍  Gimli – DHL Sendungssuche", font=("Segoe UI", 14, "bold"),
                  bg="#f0f2f5", fg="#2c3e50").pack(side="left")
 
         tk.Label(
@@ -9016,6 +9079,229 @@ class App(tk.Tk):
                      font=("Segoe UI", 9, "italic"), bg="#f0f2f5", fg="#7f8c8d",
                      ).pack(fill="x", pady=(4, 0))
 
+    # ── Pickup-Verfolgung (PU-Suche) ──────────────────────────────────────────
+    def _build_pickup_tab(self):
+        """Baut die Pickup-Verfolgung auf (analog Moria, aber für Abholer_DB)."""
+        f = self.tab_pickup
+        _hdr = tk.Frame(f, bg="#f0f2f5")
+        _hdr.pack(fill="x", padx=20, pady=(14, 4))
+        tk.Label(_hdr, text="📦  Legolas – PU-Verfolgung", font=("Segoe UI", 14, "bold"),
+                 bg="#f0f2f5", fg="#2c3e50").pack(side="left")
+        tk.Label(
+            f, text="Sucht eine PU-ID (Paket-Barcode) in der Abholer_DB "
+                    "(Live-OrcaScan + Drive-Archiv) und zeigt den Status-Verlauf.",
+            font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d",
+            anchor="w", justify="left",
+        ).pack(fill="x", padx=20, pady=(0, 10))
+
+        _inp = tk.Frame(f, bg="#f0f2f5")
+        _inp.pack(fill="x", padx=20, pady=(0, 10))
+        self._pu_track_var = tk.StringVar()
+        self._pu_track_entry = tk.Entry(
+            _inp, textvariable=self._pu_track_var,
+            font=("Consolas", 12), width=34, relief="solid", bd=1)
+        self._pu_track_entry.pack(side="left", ipady=4)
+        self._pu_track_entry.bind("<Return>", lambda e: self._pickup_search())
+        tk.Button(
+            _inp, text="🔍  Suchen", command=self._pickup_search,
+            bg="#1a5276", fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+            cursor="hand2", activebackground="#21618c", activeforeground="white",
+            padx=16, pady=5,
+        ).pack(side="left", padx=(8, 0))
+
+        self._pu_track_status = tk.Label(
+            f, text="", font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d", anchor="w")
+        self._pu_track_status.pack(fill="x", padx=20, pady=(0, 6))
+        self._pu_track_result = tk.Frame(f, bg="#f0f2f5")
+        self._pu_track_result.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        self._pu_track_cache = {}     # {"LIVE": df, "ARCHIV": df}
+        self._pu_track_busy  = False
+
+    def _pickup_get_sources(self):
+        """Liefert [(quelle_label, df), ...]: Live-OrcaScan + Drive-Archiv (gecacht)."""
+        cache = self._pu_track_cache
+        out = []
+        if "LIVE" not in cache:
+            try:
+                cache["LIVE"] = fetch_abholer_cached()
+            except Exception:
+                cache["LIVE"] = None
+        if cache.get("LIVE") is not None and not cache["LIVE"].empty:
+            out.append(("Live", cache["LIVE"]))
+        if "ARCHIV" not in cache:
+            try:
+                cache["ARCHIV"] = fetch_archiv_gdrive()
+            except Exception:
+                cache["ARCHIV"] = None
+        if cache.get("ARCHIV") is not None and not cache["ARCHIV"].empty:
+            out.append(("Archiv", cache["ARCHIV"]))
+        return out
+
+    def _pickup_tour_info(self, barcode):
+        """Sucht den Barcode in den tour_zeiten_*.json → (datum_str, 'T1'/'T2') oder None."""
+        import datetime as _dt
+        ziel = clean_barcode(barcode).lstrip("0")
+        treffer = None
+        for basis in (BASE_DIR, TOUR_ZEITEN_DIR):
+            try:
+                for p in basis.glob("tour_zeiten_*.json"):
+                    try:
+                        data = _json_mod.loads(p.read_text(encoding="utf-8"))
+                        datum = p.stem.replace("tour_zeiten_", "")
+                        for key, tour in (("t1_barcodes", "T1"), ("t2_barcodes", "T2")):
+                            for bc in (data.get(key) or []):
+                                if clean_barcode(bc).lstrip("0") == ziel:
+                                    try:
+                                        d = _dt.date.fromisoformat(datum).strftime("%d.%m.")
+                                    except Exception:
+                                        d = datum
+                                    treffer = (d, tour)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return treffer
+
+    def _pickup_search(self):
+        """Durchsucht Abholer_DB (Live + Archiv) nach der PU-ID und zeigt den Verlauf."""
+        if self._pu_track_busy:
+            return
+        for w in list(self._pu_track_result.winfo_children()):
+            w.destroy()
+        eingabe = self._pu_track_var.get().strip()
+        if not eingabe:
+            self._pu_track_status.config(text="Bitte eine PU-ID (Barcode) eingeben.")
+            return
+        such = clean_barcode(eingabe).lstrip("0")
+        if not such:
+            self._pu_track_status.config(text="Ungültige Eingabe.")
+            return
+        self._pu_track_status.config(text="🔍  Suche läuft … (Live + Archiv werden einmalig geladen)")
+        self._pu_track_busy = True
+
+        def _fmt(val):
+            # Leere Werte UND "NaT"/"NaN"/"None"-Strings als leer behandeln
+            if pd.isna(val):
+                return ""
+            s = str(val).strip()
+            if s == "" or s.lower() in ("nat", "nan", "none"):
+                return ""
+            try:
+                d = pd.to_datetime(val, errors="coerce", utc=True)
+                return fmt_dt(d) if not pd.isna(d) else ""   # NaT → leer (nicht "NaT")
+            except Exception:
+                return ""
+
+        def _worker():
+            try:
+                gefunden = {}   # norm_barcode → bestes Treffer-Dict (meiste Timestamps)
+                for quelle, df in self._pickup_get_sources():
+                    bc_col = first_existing(df, COL_BARCODE)
+                    if not bc_col:
+                        continue
+                    nm_col = first_existing(df, COL_NAME)
+                    st_col = first_existing(df, COL_STATUS)
+                    sc_col = first_existing(df, COL_SCAN_DATE)
+                    vp_col = first_existing(df, COL_VERPACKT_AT)
+                    ab_col = first_existing(df, COL_ABHOLBEREIT)
+                    ag_col = first_existing(df, COL_ABGEHOLT)
+                    zk_col = first_existing(df, COL_ZIELKIOSK)
+                    norm = df[bc_col].map(clean_barcode).str.lstrip("0")
+                    mask = norm.str.contains(such, na=False, regex=False)
+                    for idx in df.index[mask]:
+                        roh = clean_barcode(df.at[idx, bc_col])
+                        anzeige = "00" + roh if (roh.isdigit() and not roh.startswith("00")) else roh
+                        key = roh.lstrip("0")
+                        scan  = _fmt(df.at[idx, sc_col]) if sc_col else ""
+                        verp  = _fmt(df.at[idx, vp_col]) if vp_col else ""
+                        abhol = _fmt(df.at[idx, ab_col]) if ab_col else ""
+                        abge  = _fmt(df.at[idx, ag_col]) if ag_col else ""
+                        # Status aus der Timeline ableiten (konsistent mit den Schritten).
+                        # Sonderstatus (Retoure/Storno) aus dem rohen Feld haben Vorrang.
+                        roh_status = (str(df.at[idx, st_col]).strip()
+                                      if st_col and not pd.isna(df.at[idx, st_col]) else "")
+                        rsl = roh_status.lower()
+                        if "retour" in rsl or "storno" in rsl:
+                            status = roh_status
+                        elif abge:   status = "Abgeholt"
+                        elif abhol:  status = "Abholbereit"
+                        elif verp:   status = "Verpackt"
+                        else:        status = "Offen"
+                        rec = {
+                            "barcode":     anzeige,
+                            "name":        str(df.at[idx, nm_col]) if nm_col and not pd.isna(df.at[idx, nm_col]) else "",
+                            "status":      status,
+                            "zielkiosk":   str(df.at[idx, zk_col]) if zk_col and not pd.isna(df.at[idx, zk_col]) else "",
+                            "scan": scan, "verpackt": verp, "abholbereit": abhol, "abgeholt": abge,
+                            "quelle": quelle,
+                            "_n_ts": sum(1 for x in (scan, verp, abhol, abge) if x),
+                        }
+                        # pro Barcode den vollständigsten Eintrag behalten (Live > Archiv bei Gleichstand)
+                        if key not in gefunden or rec["_n_ts"] > gefunden[key]["_n_ts"]:
+                            gefunden[key] = rec
+                treffer = list(gefunden.values())
+                for rec in treffer:
+                    rec["tour"] = self._pickup_tour_info(rec["barcode"])
+                self.tab_pickup.after(0, lambda: self._pickup_show_results(eingabe, treffer))
+            except Exception as e:
+                self.tab_pickup.after(0, lambda err=e: self._pickup_show_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _pickup_show_error(self, err):
+        self._pu_track_busy = False
+        self._pu_track_status.config(text=f"⚠  Fehler bei der Suche: {err}")
+
+    def _pickup_show_results(self, eingabe, treffer):
+        """Zeigt den Status-Verlauf als Timeline (läuft im Haupt-Thread)."""
+        self._pu_track_busy = False
+        for w in list(self._pu_track_result.winfo_children()):
+            w.destroy()
+        if not treffer:
+            self._pu_track_status.config(text=f"❌  Keine PU gefunden: {eingabe}")
+            return
+        self._pu_track_status.config(text=f"✅  {len(treffer)} Treffer für „{eingabe}“")
+
+        for rec in treffer[:30]:
+            card = tk.Frame(self._pu_track_result, bg="white", relief="solid", bd=1)
+            card.pack(fill="x", pady=4)
+            # Kopf: Barcode + Name
+            kopf = tk.Frame(card, bg="white"); kopf.pack(fill="x", padx=12, pady=(8, 0))
+            tk.Label(kopf, text=rec["barcode"], font=("Consolas", 13, "bold"),
+                     bg="white", fg="#1a5276").pack(side="left")
+            if rec["name"]:
+                tk.Label(kopf, text=f"   {rec['name']}", font=("Segoe UI", 11),
+                         bg="white", fg="#2c3e50").pack(side="left")
+            # Meta-Zeile: Status · Ziel-Kiosk · Tour
+            meta = []
+            if rec["status"]:    meta.append(f"Status: {rec['status']}")
+            if rec["zielkiosk"]: meta.append(f"Ziel-Kiosk: {rec['zielkiosk']}")
+            if rec.get("tour"):  meta.append(f"Tour: {rec['tour'][1]} ({rec['tour'][0]})")
+            if meta:
+                tk.Label(card, text="   ·   ".join(meta), font=("Segoe UI", 10),
+                         bg="white", fg="#555", anchor="w").pack(fill="x", padx=12, pady=(2, 4))
+            # Timeline
+            tl = tk.Frame(card, bg="white"); tl.pack(fill="x", padx=12, pady=(0, 8))
+            for label, val in (("Scan-Datum", rec["scan"]), ("Verpackt", rec["verpackt"]),
+                               ("Abholbereit", rec["abholbereit"]), ("Abgeholt", rec["abgeholt"])):
+                row = tk.Frame(tl, bg="white"); row.pack(fill="x")
+                icon = "✅" if val else "⬜"
+                farbe = "#27ae60" if val else "#bbbbbb"
+                tk.Label(row, text=icon, font=("Segoe UI", 10), bg="white", fg=farbe,
+                         width=2).pack(side="left")
+                tk.Label(row, text=f"{label}:", font=("Segoe UI", 10, "bold"),
+                         bg="white", fg="#2c3e50", width=14, anchor="w").pack(side="left")
+                tk.Label(row, text=val or "–", font=("Segoe UI", 10),
+                         bg="white", fg="#2c3e50" if val else "#bbbbbb", anchor="w").pack(side="left")
+            tk.Label(card, text=f"Quelle: {rec['quelle']}", font=("Segoe UI", 8, "italic"),
+                     bg="white", fg="#95a5a6", anchor="w").pack(fill="x", padx=12, pady=(0, 6))
+
+        if len(treffer) > 30:
+            tk.Label(self._pu_track_result,
+                     text=f"… und {len(treffer) - 30} weitere (nur erste 30 angezeigt).",
+                     font=("Segoe UI", 9, "italic"), bg="#f0f2f5", fg="#7f8c8d",
+                     ).pack(fill="x", pady=(4, 0))
+
     def _build_sidebar_buttons(self):
         """Erstellt die Navigations-Buttons in der Sidebar."""
         SIDE_BG   = "#1a2744"
@@ -9079,11 +9365,16 @@ class App(tk.Tk):
              "DHL Normal Scans von heute\n"
              "(OrcaScan DHL_Normal Sheet).\n"
              "Export als YYMMDD.xlsx möglich."),
-            ("moria",       "🔍  Sendungssuche",   self.tab_moria,
-             "Sucht eine DHL-Sendungsnummer in allen\n"
-             "geladenen DHL-Daten (Express + Normal,\n"
-             "inkl. NAS-Archiv, Drive und Live-OrcaScan).\n"
+            ("moria",       "🔍  DHL Sendungssuche", self.tab_moria,
+             "Gimli – sucht eine DHL-Sendungsnummer in\n"
+             "allen geladenen DHL-Daten (Express + Normal,\n"
+             "inkl. Archiv, Drive und Live-OrcaScan).\n"
              "Eingabe mit oder ohne führende 00."),
+            ("pickup",      "📦  PU Sendungssuche", self.tab_pickup,
+             "Legolas – sucht eine PU-ID (Paket-Barcode)\n"
+             "in der Abholer_DB (Live + Drive-Archiv) und\n"
+             "zeigt den Status-Verlauf als Zeitleiste\n"
+             "(Scan → Verpackt → Abholbereit → Abgeholt)."),
         ]
 
         INDICATOR   = "#4a9fd4"   # helles Blau – aktiver Markierungsreiter
@@ -9357,6 +9648,65 @@ class App(tk.Tk):
     def _set_status(self, text: str):
         ts = datetime.now().strftime("%H:%M:%S")
         self.statusbar.config(text=f"[{ts}]  {text}")
+
+    # ── Großes Lade-Overlay (gut sichtbar beim ersten Laden) ──────────────────
+    def _show_loading_overlay(self, text="Bombadil lädt die Daten …"):
+        """Zeigt eine gut sichtbare zentrale Lade-Box über dem Inhaltsbereich."""
+        try:
+            if getattr(self, "_loading_overlay", None):
+                return  # läuft schon
+            # Halbtransparenter Hintergrund (dunkler Schleier) + zentrale Box
+            ov = tk.Frame(self, bg="#1a2744")
+            ov.place(relx=0, rely=0, relwidth=1, relheight=1)
+            box = tk.Frame(ov, bg="white", relief="flat", bd=0,
+                           highlightthickness=2, highlightbackground="#4a9fd4")
+            box.place(relx=0.5, rely=0.45, anchor="center")
+            inner = tk.Frame(box, bg="white")
+            inner.pack(padx=48, pady=36)
+            tk.Label(inner, text="⏳", font=("Segoe UI", 40),
+                     bg="white", fg="#1a5276").pack()
+            self._loading_overlay_lbl = tk.Label(
+                inner, text=text, font=("Segoe UI", 15, "bold"),
+                bg="white", fg="#2c3e50")
+            self._loading_overlay_lbl.pack(pady=(10, 4))
+            tk.Label(inner, text="Bitte einen Moment Geduld – das erste Laden dauert etwas.",
+                     font=("Segoe UI", 10), bg="white", fg="#7f8c8d").pack(pady=(0, 14))
+            pb = ttk.Progressbar(inner, mode="indeterminate", length=320)
+            pb.pack()
+            pb.start(12)
+            self._loading_overlay = ov
+            self._loading_overlay_base = text
+            self._loading_overlay_dots = 0
+            ov.lift()
+            self._animate_loading_overlay()
+        except Exception:
+            pass
+
+    def _animate_loading_overlay(self):
+        """Animierte Punkte (Lädt . / .. / …) – Hinweis dass Bombadil arbeitet."""
+        if not getattr(self, "_loading_overlay", None):
+            return
+        try:
+            self._loading_overlay_dots = (self._loading_overlay_dots + 1) % 4
+            punkte = "." * self._loading_overlay_dots
+            self._loading_overlay_lbl.config(text=f"{self._loading_overlay_base} {punkte}")
+            self._loading_anim_job = self.after(450, self._animate_loading_overlay)
+        except Exception:
+            pass
+
+    def _hide_loading_overlay(self):
+        """Blendet das Lade-Overlay aus."""
+        try:
+            job = getattr(self, "_loading_anim_job", None)
+            if job:
+                self.after_cancel(job)
+                self._loading_anim_job = None
+            ov = getattr(self, "_loading_overlay", None)
+            if ov:
+                ov.destroy()
+            self._loading_overlay = None
+        except Exception:
+            self._loading_overlay = None
 
     def _start_loading(self, text: str = "Lade Daten …"):
         self._set_status(text)
@@ -9646,6 +9996,7 @@ class App(tk.Tk):
             except Exception as e:
                 self.after(0, lambda err=e: (
                     self._stop_loading(f"Fehler: {err}"),
+                    self._hide_loading_overlay(),
                     messagebox.showerror("OrcaScan Fehler", str(err))
                 ))
         threading.Thread(target=_worker, daemon=True).start()
@@ -9666,6 +10017,7 @@ class App(tk.Tk):
         self._refresh_unstimmigkeiten()
         self.title(f"Bombadil  v{VERSION}")
         self._stop_loading(f"Geladen: {label}")
+        self._hide_loading_overlay()   # Lade-Overlay ausblenden (Hauptdaten sind da)
         import time as _time
         self._last_load_time = _time.time()
         self.refresh_btn.config(bg="#27ae60", activebackground="#27ae60")
