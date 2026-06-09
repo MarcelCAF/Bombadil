@@ -3,6 +3,8 @@
 token.json
 service_account.json
 oauth_credentials.json
+_github_secret_*.txt
+statistik_cache.json*
 
 # Lokale Einstellungen
 settings.json

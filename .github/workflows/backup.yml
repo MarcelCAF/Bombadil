@@ -1,0 +1,29 @@
+name: Taegliches Backup
+
+on:
+  schedule:
+    # 16:00 UTC = 18:00 MESZ (Sommer) / 17:00 MEZ (Winter) – nach Arbeitsschluss.
+    # GitHub-Cron kennt keine Sommer-/Winterzeit (laeuft immer in UTC).
+    - cron: '0 16 * * *'
+  workflow_dispatch:   # erlaubt manuelles Starten zum Testen
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Abhaengigkeiten installieren
+        run: pip install pandas openpyxl google-api-python-client google-auth
+      - name: Backup ausfuehren
+        run: python cloud_backup.py
+        env:
+          ORCA_API_KEY:             ${{ secrets.ORCA_API_KEY }}
+          ORCA_BASE_URL:            ${{ secrets.ORCA_BASE_URL }}
+          ORCA_ABHOLER_SHEET_ID:    ${{ secrets.ORCA_ABHOLER_SHEET_ID }}
+          ORCA_DHL_NORMAL_SHEET_ID: ${{ secrets.ORCA_DHL_NORMAL_SHEET_ID }}
+          ORCA_DHL_EX_SHEET_ID:     ${{ secrets.ORCA_DHL_EX_SHEET_ID }}
+          ORCA_TAGESBOTE_SHEET_ID:  ${{ secrets.ORCA_TAGESBOTE_SHEET_ID }}
+          GOOGLE_OAUTH_TOKEN:       ${{ secrets.GOOGLE_OAUTH_TOKEN }}
