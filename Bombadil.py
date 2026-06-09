@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.87"
+VERSION = "1.0.88"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -9876,17 +9876,18 @@ class App(tk.Tk):
                     return
                 p = st["p"]
                 # Grundbewegung (läuft IMMER, unabhängig vom Worker):
-                #  - bis 80 %: Beschleunigung (am Anfang langsam, dann schneller)
-                #  - ab 80 %: sanft gegen 95 %, kriecht minimal weiter (klebt nicht bei 99 %)
-                if p < 80:
-                    p += 0.5 + (p / 100.0) * 1.3
+                #  - bis 60 %: Beschleunigung (am Anfang langsam, dann schneller)
+                #  - ab 60 %: asymptotisch langsamer, ABER mit Mindesttempo (0.35/Tick),
+                #    damit der Balken NIE sichtbar stehenbleibt/„parkt".
+                if p < 60:
+                    p += 0.4 + (p / 100.0) * 1.4
                 else:
-                    p = min(95.0, p + (95.0 - p) * 0.06 + 0.05)
+                    p += max(0.35, (99.0 - p) * 0.05)
                 # optionaler Boost, wenn der Worker eine fertige Quelle meldet
                 tgt = st["target"]
                 if tgt > p:
-                    p = min(96.0, p + (tgt - p) * 0.20)
-                st["p"] = min(p, 98.5)
+                    p = min(99.0, p + (tgt - p) * 0.25)
+                st["p"] = min(p, 99.0)
                 try:
                     self._draw_game_bar(cv, st["p"], w=300, h=28)
                     txt = stages[0][1]
