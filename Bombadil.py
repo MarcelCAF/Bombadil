@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.86"
+VERSION = "1.0.87"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8984,12 +8984,19 @@ class App(tk.Tk):
             self._moria_status.config(text="🔍  Suche läuft …")
 
         self._moria_busy = True
+        self._search_loading_box(
+            self._moria_result, "DHL-Daten werden geladen …",
+            stages=[(0, "Lade Live-Daten …"), (50, "Lade Archiv …"),
+                    (85, "Durchsuche Sendungen …")],
+            key="moria")
+
+        n_quellen = max(1, len(quellen))
 
         def _worker():
             try:
                 treffer = []
                 seen = set()   # dedupliziert gleiche Sendung aus mehreren Quellen
-                for typ, folder, sheet_id in quellen:
+                for q_i, (typ, folder, sheet_id) in enumerate(quellen):
                     for quelle, df in self._moria_get_sources(typ, folder, sheet_id):
                         if df is None or df.empty:
                             continue
@@ -9008,6 +9015,9 @@ class App(tk.Tk):
                             seen.add(anzeige)
                             scan = fmt_dt(df.at[idx, sc_col]) if sc_col else ""
                             treffer.append((anzeige, typ, scan, quelle))
+                    # echten Fortschritt melden: pro fertiger Quelle ein Stück
+                    ziel = 15 + int((q_i + 1) / n_quellen * 80)   # 15 → 95 %
+                    self.after(0, lambda z=ziel: self._bump_search("moria", z))
                 self.tab_moria.after(0, lambda: self._moria_show_results(eingabe, treffer))
             except Exception as e:
                 self.tab_moria.after(0, lambda err=e: self._moria_show_error(err))
@@ -9048,6 +9058,8 @@ class App(tk.Tk):
 
     def _moria_show_error(self, err):
         self._moria_busy = False
+        for w in list(self._moria_result.winfo_children()):
+            w.destroy()   # Lade-Box entfernen
         self._moria_status.config(text=f"⚠  Fehler bei der Suche: {err}")
 
     def _moria_show_results(self, eingabe, treffer):
@@ -9118,24 +9130,24 @@ class App(tk.Tk):
         self._pu_track_busy  = False
 
     def _pickup_get_sources(self):
-        """Liefert [(quelle_label, df), ...]: Live-OrcaScan + Drive-Archiv (gecacht)."""
+        """Liefert nacheinander (quelle_label, df): Live-OrcaScan + Drive-Archiv
+        (gecacht). Als Generator (yield) – so wird jede Quelle erst BEIM Abruf
+        geladen, und der Such-Ladebalken kann den echten Fortschritt anzeigen."""
         cache = self._pu_track_cache
-        out = []
         if "LIVE" not in cache:
             try:
                 cache["LIVE"] = fetch_abholer_cached()
             except Exception:
                 cache["LIVE"] = None
         if cache.get("LIVE") is not None and not cache["LIVE"].empty:
-            out.append(("Live", cache["LIVE"]))
+            yield ("Live", cache["LIVE"])
         if "ARCHIV" not in cache:
             try:
                 cache["ARCHIV"] = fetch_archiv_gdrive()
             except Exception:
                 cache["ARCHIV"] = None
         if cache.get("ARCHIV") is not None and not cache["ARCHIV"].empty:
-            out.append(("Archiv", cache["ARCHIV"]))
-        return out
+            yield ("Archiv", cache["ARCHIV"])
 
     def _pickup_tour_info(self, barcode):
         """Sucht den Barcode in den tour_zeiten_*.json → (datum_str, 'T1'/'T2') oder None."""
@@ -9178,6 +9190,11 @@ class App(tk.Tk):
             return
         self._pu_track_status.config(text="🔍  Suche läuft … (Live + Archiv werden einmalig geladen)")
         self._pu_track_busy = True
+        self._search_loading_box(
+            self._pu_track_result, "PU-Daten werden geladen …",
+            stages=[(0, "Lade Live-Daten …"), (50, "Lade Archiv …"),
+                    (85, "Durchsuche Pickups …")],
+            key="pickup")
 
         def _fmt(val):
             # Leere Werte UND "NaT"/"NaN"/"None"-Strings als leer behandeln
@@ -9195,7 +9212,13 @@ class App(tk.Tk):
         def _worker():
             try:
                 gefunden = {}   # norm_barcode → bestes Treffer-Dict (meiste Timestamps)
-                for quelle, df in self._pickup_get_sources():
+                # direkt über den Generator iterieren → Laden passiert WÄHREND der
+                # Schleife, sodass wir nach jeder fertigen Quelle echten Fortschritt
+                # melden können (Live ≈ 55 %, danach Archiv ≈ 95 %).
+                q_ziele = [55, 95]
+                for q_i, (quelle, df) in enumerate(self._pickup_get_sources()):
+                    ziel = q_ziele[min(q_i, len(q_ziele) - 1)]
+                    self.after(0, lambda z=ziel: self._bump_search("pickup", z))
                     bc_col = first_existing(df, COL_BARCODE)
                     if not bc_col:
                         continue
@@ -9250,6 +9273,8 @@ class App(tk.Tk):
 
     def _pickup_show_error(self, err):
         self._pu_track_busy = False
+        for w in list(self._pu_track_result.winfo_children()):
+            w.destroy()   # Lade-Box entfernen
         self._pu_track_status.config(text=f"⚠  Fehler bei der Suche: {err}")
 
     def _pickup_show_results(self, eingabe, treffer):
@@ -9649,64 +9674,243 @@ class App(tk.Tk):
         ts = datetime.now().strftime("%H:%M:%S")
         self.statusbar.config(text=f"[{ts}]  {text}")
 
-    # ── Großes Lade-Overlay (gut sichtbar beim ersten Laden) ──────────────────
+    # ── Gaming-Lade-Tipps (rotieren unten im Ladescreen) ─────────────────────
+    _LOADING_TIPS = [
+        # PU heute (ohne Tour-Manipulation)
+        "Tipp: Rechtsklick auf 'PU heute' → Aus Tagesboten löschen (Abholer_DB bleibt erhalten).",
+        "Tipp: 'PU heute' zeigt alle für die Touren verpackten Pakete des Tages.",
+        # Sendungssuche
+        "Tipp: DHL- & PU-Sendungssuche durchsuchen Live-Daten UND das Archiv.",
+        "Tipp: In der Sendungssuche reicht auch ein Teil des Barcodes.",
+        "Tipp: Die PU-Sendungssuche zeigt den ganzen Status-Verlauf als Zeitleiste.",
+        # Statistik
+        "Tipp: Die Statistik kann einen frei wählbaren Zeitraum anzeigen.",
+        "Tipp: Bei Statistik-Problemen hilft oft ein Neuaufbau des Caches.",
+        "Wusstest du? Die Statistik kombiniert Live-Daten, Drive-Archiv und Touren.",
+    ]
+
+    @staticmethod
+    def _round_rect(canvas, x1, y1, x2, y2, r, **kw):
+        """Zeichnet ein abgerundetes Rechteck auf ein Canvas (für den Balken)."""
+        pts = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
+               x2-r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y1+r, x1, y1]
+        return canvas.create_polygon(pts, smooth=True, **kw)
+
+    @staticmethod
+    def _mix_color(c1, c2, t):
+        """Mischt zwei Hex-Farben (#rrggbb) im Verhältnis t (0..1)."""
+        a = [int(c1[i:i+2], 16) for i in (1, 3, 5)]
+        b = [int(c2[i:i+2], 16) for i in (1, 3, 5)]
+        m = [int(a[i] + (b[i]-a[i])*t) for i in range(3)]
+        return f"#{m[0]:02x}{m[1]:02x}{m[2]:02x}"
+
+    def _draw_game_bar(self, canvas, pct, w=360, h=30):
+        """Zeichnet den Gaming-Balken: dunkle Rinne, Farbverlauf-Füllung
+        (cyan → grün), Glanzlinie oben und % zentriert in Weiß."""
+        try:
+            canvas.delete("all")
+            r = h // 2
+            # Rinne (dunkel)
+            self._round_rect(canvas, 1, 1, w-1, h-1, r,
+                             fill="#0d1b2a", outline="#1b3a5c")
+            fw = int((w-2) * max(0, min(100, pct)) / 100)
+            if fw >= 2:
+                fw = max(fw, h)   # mind. ein abgerundetes Stück
+                # Farbverlauf als senkrechte Linien (cyan → grün)
+                for x in range(2, fw):
+                    t = (x-2) / max(1, (w-4))
+                    canvas.create_line(x, 3, x, h-3,
+                                       fill=self._mix_color("#00c6ff", "#2ee65c", t))
+                # abgerundete Maske über die Füllung legen (für runde Enden)
+                self._round_rect(canvas, 1, 1, fw, h-1, r,
+                                 fill="", outline="#7CF5A0", width=1)
+                # Glanzlinie oben
+                canvas.create_line(r, 5, fw-r, 5, fill="#bff7ff")
+            # Prozent zentriert
+            canvas.create_text(w//2, h//2, text=f"{int(pct)} %",
+                               fill="white", font=("Segoe UI", 12, "bold"))
+        except Exception:
+            pass
+
+    # ── Großes Lade-Overlay (dezent, mit %-Balken) ────────────────────────────
     def _show_loading_overlay(self, text="Bombadil lädt die Daten …"):
         """Zeigt eine gut sichtbare zentrale Lade-Box über dem Inhaltsbereich."""
         try:
             if getattr(self, "_loading_overlay", None):
                 return  # läuft schon
-            # Halbtransparenter Hintergrund (dunkler Schleier) + zentrale Box
-            ov = tk.Frame(self, bg="#1a2744")
+            # Dunkler Vollbild-Hintergrund (Loadingscreen-Effekt), keine Box
+            ov = tk.Frame(self, bg="#0a1424")
             ov.place(relx=0, rely=0, relwidth=1, relheight=1)
-            box = tk.Frame(ov, bg="white", relief="flat", bd=0,
-                           highlightthickness=2, highlightbackground="#4a9fd4")
-            box.place(relx=0.5, rely=0.45, anchor="center")
-            inner = tk.Frame(box, bg="white")
-            inner.pack(padx=48, pady=36)
-            tk.Label(inner, text="⏳", font=("Segoe UI", 40),
-                     bg="white", fg="#1a5276").pack()
+            inner = tk.Frame(ov, bg="#0a1424")
+            inner.place(relx=0.5, rely=0.45, anchor="center")
+            tk.Label(inner, text="🌿", font=("Segoe UI", 44),
+                     bg="#0a1424", fg="#2ee65c").pack()
+            tk.Label(inner, text="BOMBADIL", font=("Segoe UI", 26, "bold"),
+                     bg="#0a1424", fg="#ffffff").pack(pady=(2, 0))
             self._loading_overlay_lbl = tk.Label(
                 inner, text=text, font=("Segoe UI", 15, "bold"),
-                bg="white", fg="#2c3e50")
-            self._loading_overlay_lbl.pack(pady=(10, 4))
-            tk.Label(inner, text="Bitte einen Moment Geduld – das erste Laden dauert etwas.",
-                     font=("Segoe UI", 10), bg="white", fg="#7f8c8d").pack(pady=(0, 14))
-            pb = ttk.Progressbar(inner, mode="indeterminate", length=320)
-            pb.pack()
-            pb.start(12)
+                bg="#0a1424", fg="#9ad6ff")
+            self._loading_overlay_lbl.pack(pady=(10, 12))
+            # %-Balken (Canvas mit Farbverlauf)
+            cv = tk.Canvas(inner, width=360, height=30, bg="#0a1424",
+                           highlightthickness=0, bd=0)
+            cv.pack()
+            self._loading_overlay_cv = cv
+            self._draw_game_bar(cv, 0)
+            # rotierende Tipps unten (dezent)
+            self._loading_overlay_tip = tk.Label(
+                inner, text=self._LOADING_TIPS[0], font=("Segoe UI", 10, "italic"),
+                bg="#0a1424", fg="#7f9bbf", wraplength=360)
+            self._loading_overlay_tip.pack(pady=(16, 0))
             self._loading_overlay = ov
             self._loading_overlay_base = text
-            self._loading_overlay_dots = 0
+            self._loading_overlay_progress = 0.0
+            self._loading_overlay_tick = 0
+            self._loading_overlay_tip_idx = 0
             ov.lift()
             self._animate_loading_overlay()
         except Exception:
             pass
 
+    # Etappen-Texte des Start-Ladevorgangs (nach %-Schwelle)
+    def _loading_overlay_stage(self, pct):
+        if pct < 25:
+            return "Verbinde mit OrcaScan"
+        if pct < 55:
+            return "Lade Pickup-Daten (Abholer_DB)"
+        if pct < 80:
+            return "Lade DHL-Daten"
+        return "Berechne Statistik"
+
     def _animate_loading_overlay(self):
-        """Animierte Punkte (Lädt . / .. / …) – Hinweis dass Bombadil arbeitet."""
+        """Smooth hochlaufender Gaming-Balken + wechselnder Etappen-Text +
+        rotierende Tipps. Läuft asymptotisch gegen 95 % – die letzten 5 %
+        springen erst, wenn die Daten fertig sind (_hide_loading_overlay)."""
         if not getattr(self, "_loading_overlay", None):
             return
         try:
-            self._loading_overlay_dots = (self._loading_overlay_dots + 1) % 4
-            punkte = "." * self._loading_overlay_dots
-            self._loading_overlay_lbl.config(text=f"{self._loading_overlay_base} {punkte}")
-            self._loading_anim_job = self.after(450, self._animate_loading_overlay)
+            p = self._loading_overlay_progress
+            p = min(95.0, p + max(0.4, (95.0 - p) * 0.05))
+            self._loading_overlay_progress = p
+            self._draw_game_bar(self._loading_overlay_cv, p)
+            self._loading_overlay_lbl.config(text=self._loading_overlay_stage(p) + " …")
+            # Tipp alle ~5 s wechseln (25 Ticks × 200 ms)
+            self._loading_overlay_tick += 1
+            if self._loading_overlay_tick % 25 == 0:
+                self._loading_overlay_tip_idx = (
+                    (self._loading_overlay_tip_idx + 1) % len(self._LOADING_TIPS))
+                self._loading_overlay_tip.config(
+                    text=self._LOADING_TIPS[self._loading_overlay_tip_idx])
+            self._loading_anim_job = self.after(200, self._animate_loading_overlay)
         except Exception:
             pass
 
     def _hide_loading_overlay(self):
-        """Blendet das Lade-Overlay aus."""
+        """Setzt den Balken auf 100 %, zeigt kurz 'Fertig' und blendet dann aus."""
         try:
             job = getattr(self, "_loading_anim_job", None)
             if job:
                 self.after_cancel(job)
                 self._loading_anim_job = None
             ov = getattr(self, "_loading_overlay", None)
+            if not ov:
+                self._loading_overlay = None
+                return
+            # Balken auf 100 % füllen, kurz anzeigen, dann zerstören
+            try:
+                self._draw_game_bar(self._loading_overlay_cv, 100)
+                self._loading_overlay_lbl.config(text="Fertig ✓")
+            except Exception:
+                pass
+            self.after(350, self._destroy_loading_overlay)
+        except Exception:
+            self._destroy_loading_overlay()
+
+    def _destroy_loading_overlay(self):
+        try:
+            ov = getattr(self, "_loading_overlay", None)
             if ov:
                 ov.destroy()
-            self._loading_overlay = None
         except Exception:
-            self._loading_overlay = None
+            pass
+        self._loading_overlay = None
+
+    def _search_loading_box(self, frame, text="Daten werden geladen …", stages=None, key=None):
+        """Zeigt eine sichtbare Lade-Box (Spinner + %-Balken + Etappen-Text) in
+        einem Suchergebnis-Bereich. Der Balken läuft smooth bis ~95 % hoch und
+        verschwindet automatisch, sobald der Bereich beim Anzeigen der Treffer
+        geleert wird (Box wird zerstört → Animation stoppt von selbst).
+
+        stages: optionale Liste [(schwelle_%, "Text"), …] für den Etappen-Text.
+        key:    Name, über den der Suchworker den ECHTEN Fortschritt meldet
+                (self._bump_search(key, ziel_%)). Der Balken läuft dann smooth
+                zum jeweils gemeldeten Ziel statt blind hochzukriechen."""
+        try:
+            stages = stages or [(0, text)]
+            box = tk.Frame(frame, bg="#f0f2f5")
+            box.pack(pady=40)
+            tk.Label(box, text="🌿", font=("Segoe UI", 32),
+                     bg="#f0f2f5", fg="#2ee65c").pack()
+            stage_lbl = tk.Label(box, text=stages[0][1], font=("Segoe UI", 12, "bold"),
+                                 bg="#f0f2f5", fg="#2c3e50")
+            stage_lbl.pack(pady=(6, 6))
+            cv = tk.Canvas(box, width=300, height=28, bg="#f0f2f5",
+                           highlightthickness=0, bd=0)
+            cv.pack()
+            self._draw_game_bar(cv, 0, w=300, h=28)
+            tk.Label(box, text="(beim ersten Mal werden Live + Archiv eingelesen)",
+                     font=("Segoe UI", 9), bg="#f0f2f5", fg="#7f8c8d").pack(pady=(8, 10))
+
+            # state["target"] = optionaler Fortschritts-Boost (vom Worker gemeldet)
+            st = {"p": 0.0, "target": 0.0}
+            if not hasattr(self, "_search_bar_states"):
+                self._search_bar_states = {}
+            if key:
+                self._search_bar_states[key] = st
+
+            def _tick():
+                # stoppt automatisch, sobald die Box weg ist (Ergebnisanzeige)
+                if not box.winfo_exists() or not cv.winfo_exists():
+                    if key:
+                        self._search_bar_states.pop(key, None)
+                    return
+                p = st["p"]
+                # Grundbewegung (läuft IMMER, unabhängig vom Worker):
+                #  - bis 80 %: Beschleunigung (am Anfang langsam, dann schneller)
+                #  - ab 80 %: sanft gegen 95 %, kriecht minimal weiter (klebt nicht bei 99 %)
+                if p < 80:
+                    p += 0.5 + (p / 100.0) * 1.3
+                else:
+                    p = min(95.0, p + (95.0 - p) * 0.06 + 0.05)
+                # optionaler Boost, wenn der Worker eine fertige Quelle meldet
+                tgt = st["target"]
+                if tgt > p:
+                    p = min(96.0, p + (tgt - p) * 0.20)
+                st["p"] = min(p, 98.5)
+                try:
+                    self._draw_game_bar(cv, st["p"], w=300, h=28)
+                    txt = stages[0][1]
+                    for schwelle, t in stages:
+                        if st["p"] >= schwelle:
+                            txt = t
+                    stage_lbl.config(text=txt)
+                except Exception:
+                    return
+                self.after(120, _tick)
+
+            self.after(120, _tick)
+        except Exception:
+            pass
+
+    def _bump_search(self, key, target):
+        """Meldet dem Such-Ladebalken einen Fortschritts-Boost (Ziel-%).
+        Vom Hintergrund-Worker via self.after(0, …) aufrufen (optional)."""
+        try:
+            st = getattr(self, "_search_bar_states", {}).get(key)
+            if st and target > st["target"]:
+                st["target"] = float(target)
+        except Exception:
+            pass
 
     def _start_loading(self, text: str = "Lade Daten …"):
         self._set_status(text)
