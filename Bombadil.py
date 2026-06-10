@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.88"
+VERSION = "1.0.89"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -752,7 +752,8 @@ def _fetch_single_archiv_gdrive(filename: str, folder_id: str) -> "pd.DataFrame 
     if not GDRIVE_AVAILABLE:
         return None
     try:
-        service = _get_oauth_drive_service()
+        # Lesen → bevorzugt Service Account (kein Browser-Login auf Kollegen-PCs)
+        service = _get_drive_service_preferred()
         res = service.files().list(
             q=f"name = '{filename}' and '{folder_id}' in parents and trashed = false",
             fields="files(id)",
@@ -967,7 +968,8 @@ def fetch_dhl_archiv_gdrive() -> tuple:
     if not GDRIVE_AVAILABLE:
         return empty
     try:
-        service = _get_oauth_drive_service()
+        # Lesen → bevorzugt Service Account (kein Browser-Login auf Kollegen-PCs)
+        service = _get_drive_service_preferred()
     except Exception:
         return empty
 
@@ -3323,7 +3325,8 @@ def fetch_archiv_gdrive() -> "pd.DataFrame":
         raise RuntimeError("Google API nicht verfügbar (pip install google-api-python-client google-auth).")
 
     def _load_once() -> "pd.DataFrame":
-        service = _get_oauth_drive_service()
+        # Lesen → bevorzugt Service Account (kein Browser-Login auf Kollegen-PCs)
+        service = _get_drive_service_preferred()
 
         # Beide Datei-Typen laden:
         # - Abholer_DB_Archiv_* → Cleanup-Archive (Pakete aus OrcaScan entfernt)
