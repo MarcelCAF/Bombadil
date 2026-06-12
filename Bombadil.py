@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.89"
+VERSION = "1.0.90"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -9684,7 +9684,6 @@ class App(tk.Tk):
         "Tipp: 'PU heute' zeigt alle für die Touren verpackten Pakete des Tages.",
         # Sendungssuche
         "Tipp: DHL- & PU-Sendungssuche durchsuchen Live-Daten UND das Archiv.",
-        "Tipp: In der Sendungssuche reicht auch ein Teil des Barcodes.",
         "Tipp: Die PU-Sendungssuche zeigt den ganzen Status-Verlauf als Zeitleiste.",
         # Statistik
         "Tipp: Die Statistik kann einen frei wählbaren Zeitraum anzeigen.",
