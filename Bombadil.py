@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.92"
+VERSION = "1.0.93"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -2877,7 +2877,8 @@ class TableTab:
     def __init__(self, parent, title: str, columns: list[tuple[str, str, int]],
                  today_header: bool = False, row_color_fn=None,
                  editable_col_map=None, orca_sheet_id=None, orca_id_idx=None,
-                 legend_items=None):
+                 legend_items=None, on_export=None,
+                 export_label="📁  Als CSV exportieren"):
         try:
             from tksheet import Sheet as _Sheet
         except ImportError:
@@ -2905,6 +2906,18 @@ class TableTab:
         self.count_lbl = tk.Label(sr, text=self._count_text(0),
                                   anchor="e", width=(28 if today_header else 16))
         self.count_lbl.pack(side="left", padx=(8, 0))
+
+        # -- optionaler CSV-Export-Knopf (rechts in der Suchzeile)
+        self._on_export = on_export
+        if on_export is not None:
+            self._export_btn = tk.Button(
+                sr, text=export_label,
+                command=lambda: self._on_export(self.rows),
+                bg="#2c3e50", fg="white", relief="flat",
+                font=("Segoe UI", 8, "bold"), cursor="hand2",
+                activebackground="#1a3a5c", activeforeground="white",
+                padx=10, pady=2)
+            self._export_btn.pack(side="left", padx=(8, 0))
 
         # -- Tabelle (tksheet) + optionale Seitenlegende
         tr = tk.Frame(self.frame)
@@ -8301,13 +8314,47 @@ class App(tk.Tk):
             return "#ff9999" if str(row[-1]).strip() == "Ja" else None
         _gal_cols = [("barcode", "Barcode", 240), ("zeitstempel", "Zeit", 160),
                      ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
-        def _make_gal_tab(titel):
+
+        def _gal_export(versandart):
+            """CSV-Export einer Versandart: Barcode + Zeit, OHNE mögliche Duplikate,
+            Speicherort per Dialog wählbar."""
+            def _do(rows):
+                import csv as _csv, datetime as _dt
+                from tkinter import filedialog as _fd
+                # rows = (barcode, zeit, station, dup) → Duplikate weglassen, nur Barcode+Zeit
+                daten = [(r[0], r[1]) for r in rows if str(r[-1]).strip() != "Ja"]
+                if not daten:
+                    messagebox.showinfo(
+                        "Export", f"Keine exportierbaren {versandart}-Scans vorhanden\n"
+                                  "(nur Duplikate oder keine Daten).")
+                    return
+                default = f"Galadriel_{versandart}_{_dt.date.today().isoformat()}.csv"
+                pfad = _fd.asksaveasfilename(
+                    title=f"{versandart}-Scans exportieren",
+                    defaultextension=".csv", initialfile=default,
+                    filetypes=[("CSV-Datei", "*.csv"), ("Alle Dateien", "*.*")])
+                if not pfad:
+                    return
+                try:
+                    with open(pfad, "w", newline="", encoding="utf-8-sig") as f:
+                        w = _csv.writer(f, delimiter=";")
+                        w.writerow(["barcode", "zeit"])
+                        w.writerows(daten)
+                    messagebox.showinfo(
+                        "Export", f"{len(daten)} {versandart}-Scans exportiert:\n{pfad}")
+                except Exception as e:
+                    messagebox.showerror("Export-Fehler", str(e))
+            return _do
+
+        def _make_gal_tab(titel, versandart):
             return TableTab(self.nb, titel, _gal_cols, today_header=True,
                             row_color_fn=_galadriel_color,
-                            legend_items=[("#ff9999", "Mögliches Duplikat")])
-        self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)")
-        self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)")
-        self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)")
+                            legend_items=[("#ff9999", "Mögliches Duplikat")],
+                            on_export=_gal_export(versandart),
+                            export_label="📁  Tages-Export (CSV)")
+        self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)", "Express")
+        self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)", "Normal")
+        self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)", "Urbify")
         self.nb.add(self.tab_gal_express.frame, text="  Express (Galadriel)  ")
         self.nb.add(self.tab_gal_normal.frame,  text="  Normal (Galadriel)  ")
         self.nb.add(self.tab_gal_urbify.frame,  text="  Urbify  ")
@@ -9463,7 +9510,7 @@ class App(tk.Tk):
             ("gal_normal",  "📡  Normal (Galadriel)",  self.tab_gal_normal.frame,
              "Galadriel – DHL-Normal-Scans des Tages\n"
              "aus Google Drive (CSV, nur typ=Normal)."),
-            ("gal_urbify",  "📡  Urbify",             self.tab_gal_urbify.frame,
+            ("gal_urbify",  "📡  Urbify (Galadriel)", self.tab_gal_urbify.frame,
              "Galadriel – Urbify-Scans des Tages\n"
              "aus Google Drive (CSV, nur typ=Urbify)."),
             ("moria",       "🔍  DHL Sendungssuche", self.tab_moria,
