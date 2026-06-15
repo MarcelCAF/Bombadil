@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.93"
+VERSION = "1.0.94"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8316,10 +8316,10 @@ class App(tk.Tk):
                      ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
 
         def _gal_export(versandart):
-            """CSV-Export einer Versandart: Barcode + Zeit, OHNE mögliche Duplikate,
-            Speicherort per Dialog wählbar."""
+            """Excel-Export einer Versandart: Barcode + Zeit, OHNE mögliche Duplikate,
+            Speicherort per Dialog wählbar. Barcode als Text (führende Nullen bleiben)."""
             def _do(rows):
-                import csv as _csv, datetime as _dt
+                import datetime as _dt
                 from tkinter import filedialog as _fd
                 # rows = (barcode, zeit, station, dup) → Duplikate weglassen, nur Barcode+Zeit
                 daten = [(r[0], r[1]) for r in rows if str(r[-1]).strip() != "Ja"]
@@ -8328,18 +8328,17 @@ class App(tk.Tk):
                         "Export", f"Keine exportierbaren {versandart}-Scans vorhanden\n"
                                   "(nur Duplikate oder keine Daten).")
                     return
-                default = f"Galadriel_{versandart}_{_dt.date.today().isoformat()}.csv"
+                default = f"Galadriel_{versandart}_{_dt.date.today().isoformat()}.xlsx"
                 pfad = _fd.asksaveasfilename(
                     title=f"{versandart}-Scans exportieren",
-                    defaultextension=".csv", initialfile=default,
-                    filetypes=[("CSV-Datei", "*.csv"), ("Alle Dateien", "*.*")])
+                    defaultextension=".xlsx", initialfile=default,
+                    filetypes=[("Excel-Datei", "*.xlsx"), ("Alle Dateien", "*.*")])
                 if not pfad:
                     return
                 try:
-                    with open(pfad, "w", newline="", encoding="utf-8-sig") as f:
-                        w = _csv.writer(f, delimiter=";")
-                        w.writerow(["barcode", "zeit"])
-                        w.writerows(daten)
+                    df_export = pd.DataFrame(daten, columns=["barcode", "zeit"])
+                    # Barcode als Text formatieren → führende Nullen (00340…) bleiben erhalten
+                    write_excel_text_cols(df_export, Path(pfad), ["barcode"])
                     messagebox.showinfo(
                         "Export", f"{len(daten)} {versandart}-Scans exportiert:\n{pfad}")
                 except Exception as e:
@@ -8351,7 +8350,7 @@ class App(tk.Tk):
                             row_color_fn=_galadriel_color,
                             legend_items=[("#ff9999", "Mögliches Duplikat")],
                             on_export=_gal_export(versandart),
-                            export_label="📁  Tages-Export (CSV)")
+                            export_label="📁  Tages-Export (Excel)")
         self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)", "Express")
         self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)", "Normal")
         self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)", "Urbify")
