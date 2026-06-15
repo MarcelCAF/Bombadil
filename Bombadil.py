@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.90"
+VERSION = "1.0.91"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -397,6 +397,7 @@ GDRIVE_FOLDER_DHL_EXPRESS= "1J_oZcBmPECYfL7xj5U0oxgao--sdzS_c"   # Ordner: EXPRE
 GDRIVE_FOLDER_TAGESBOTE  = "1a5Wg-fFhF11ux5d7Tl5oVqcq9fRkp5yX"   # Ordner: Tagesbote Upload
 GDRIVE_FOLDER_TOUR_ZEITEN= "1ALz0IR6JeoUVXFMAMxida4MT7lQ0ArDd"    # Ordner: Tourlisten
 GDRIVE_FOLDER_CLOUDDATEN = "1WsNmFk7MordAuTFXPeb_UEMRnd206DUt"    # Ordner: Clouddaten (Cache)
+GDRIVE_FOLDER_GALADRIEL  = "12_3AOlSf29Wxhf3huBgoQC1tIFuJNgZf"    # Ordner: Galadriel (DHL-Scan-CSVs)
 # Rückwärts-Kompatibilität (alte Namen als Aliase – damit nichts bricht)
 GDRIVE_ABHOLER_FOLDER_ID = GDRIVE_FOLDER_ABHOLER
 GDRIVE_FOLDER_ID         = GDRIVE_FOLDER_TAGESBOTE
@@ -775,6 +776,50 @@ def _fetch_single_archiv_gdrive(filename: str, folder_id: str) -> "pd.DataFrame 
         return pd.read_excel(buf)
     except Exception:
         return None
+
+
+def fetch_galadriel_scans_gdrive(datum_str: str) -> "pd.DataFrame":
+    """Lädt Galadriels DHL-Scan-CSV (scans_<datum>.csv) aus dem Galadriel-Ordner.
+
+    WICHTIG: Galadriel legt die CSVs mit dem Scope 'drive.file' an. Der Service
+    Account sieht diese Dateien NICHT – nur Bombadils OAuth-Token (token.json,
+    gleiche oauth_credentials.json + gleiches Google-Konto). Daher hier zwingend
+    _get_oauth_drive_service() (NICHT _get_drive_service_preferred()).
+
+    Gibt einen DataFrame zurück (leeres df wenn Datei fehlt / kein Zugang / Fehler).
+    Spalten der CSV: barcode, typ, station, zeitstempel, moeglich_duplikat.
+    """
+    if not GDRIVE_AVAILABLE:
+        return pd.DataFrame()
+    # Kein OAuth-Token vorhanden? → leer zurückgeben, NICHT den Browser-Login
+    # erzwingen (sonst öffnet sich auf Kollegen-PCs ohne token.json ein Fenster).
+    if not OAUTH_TOKEN_FILE.exists():
+        return pd.DataFrame()
+    filename = f"scans_{datum_str}.csv"
+    try:
+        service = _get_oauth_drive_service()
+        res = service.files().list(
+            q=f"name = '{filename}' and '{GDRIVE_FOLDER_GALADRIEL}' in parents and trashed = false",
+            fields="files(id)",
+            pageSize=5,
+            orderBy="modifiedTime desc",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            return pd.DataFrame()
+        import io as _io
+        request = service.files().get_media(fileId=files[0]["id"])
+        buf = _io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return pd.read_csv(buf)
+    except Exception:
+        return pd.DataFrame()
 
 
 def _delete_drive_files_by_name(filename: str, folder_id: str):
@@ -8249,6 +8294,24 @@ class App(tk.Tk):
         self.tab_dhl_merge = DHLMergeTab(self.nb, get_export_folder=lambda: self.export_folder)
         self.nb.add(self.tab_dhl_merge.frame, text="  DHL (heute)  ")
 
+        # 10b. Galadriel – DHL-Scans des Tages aus Google Drive (CSV), nach Typ aufgeteilt.
+        #      Je Tab nur ein Typ → die Typ-Spalte entfällt (wäre redundant).
+        def _galadriel_color(row):
+            # letzte Spalte = Duplikat-Markierung ("Ja"/"") → verdächtige Zeile orange
+            return "#ffe0b2" if str(row[-1]).strip() == "Ja" else None
+        _gal_cols = [("barcode", "Barcode", 240), ("station", "Station", 140),
+                     ("zeitstempel", "Zeit", 160), ("dup", "⚠ Duplikat?", 100)]
+        def _make_gal_tab(titel):
+            return TableTab(self.nb, titel, _gal_cols, today_header=True,
+                            row_color_fn=_galadriel_color,
+                            legend_items=[("#ffe0b2", "Mögliches Duplikat")])
+        self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)")
+        self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)")
+        self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)")
+        self.nb.add(self.tab_gal_express.frame, text="  Express (Galadriel)  ")
+        self.nb.add(self.tab_gal_normal.frame,  text="  Normal (Galadriel)  ")
+        self.nb.add(self.tab_gal_urbify.frame,  text="  Urbify  ")
+
         # 11. Moria – Sendungssuche (durchsucht geladene DHL-Daten)
         self.tab_moria = tk.Frame(self.nb, bg="#f0f2f5")
         self.nb.add(self.tab_moria, text="  DHL Sendungssuche  ")
@@ -8424,6 +8487,7 @@ class App(tk.Tk):
         self._show_loading_overlay("Bombadil lädt die Daten")   # gut sichtbarer Lade-Hinweis
         self.after(200,    self.load_main_orca)
         self.after(400,    self.load_dhl_orca)
+        self.after(500,    self.load_galadriel_async)   # Galadriel-Scans (Drive-CSV)
         self.after(600,    self.toggle_refresh)
         self.after(800,    self.toggle_dhl_refresh)
         self.after(3_000,  self.tab_statistik.load_cache_async)     # Cache zuerst, dann frische Daten
@@ -9385,7 +9449,7 @@ class App(tk.Tk):
             ("yesterday",   "📅  Gestern",          self.tab_yest.frame,
              "Pakete die gestern abgeholt wurden.\n"
              "Sortierung: Neueste zuerst."),
-            "DHL",
+            "VERSAND",
             ("dhl_express", "🚚  DHL Express",     self.tab_dhl.frame,
              "DHL Express Scans von heute.\n"
              "Zeigt Barcode + Scan-Zeitpunkt."),
@@ -9393,6 +9457,15 @@ class App(tk.Tk):
              "DHL Normal Scans von heute\n"
              "(OrcaScan DHL_Normal Sheet).\n"
              "Export als YYMMDD.xlsx möglich."),
+            ("gal_express", "📡  Express (Galadriel)", self.tab_gal_express.frame,
+             "Galadriel – DHL-Express-Scans des Tages\n"
+             "aus Google Drive (CSV, nur typ=Express)."),
+            ("gal_normal",  "📡  Normal (Galadriel)",  self.tab_gal_normal.frame,
+             "Galadriel – DHL-Normal-Scans des Tages\n"
+             "aus Google Drive (CSV, nur typ=Normal)."),
+            ("gal_urbify",  "📡  Urbify",             self.tab_gal_urbify.frame,
+             "Galadriel – Urbify-Scans des Tages\n"
+             "aus Google Drive (CSV, nur typ=Urbify)."),
             ("moria",       "🔍  DHL Sendungssuche", self.tab_moria,
              "Gimli – sucht eine DHL-Sendungsnummer in\n"
              "allen geladenen DHL-Daten (Express + Normal,\n"
@@ -10276,6 +10349,53 @@ class App(tk.Tk):
         self._n_dhl_express  = len(rows_ex)
         self._on_pu_count_change_pakete()
 
+    def load_galadriel_async(self):
+        """Lädt Galadriels heutige DHL-Scan-CSV von Google Drive in den
+        Galadriel-Tab. Läuft im Hintergrund-Thread (blockiert die App nicht).
+        Bei fehlendem Token / fehlender CSV / Fehler bleibt der Tab einfach leer."""
+        import threading, datetime as _dt
+        heute = _dt.date.today().strftime("%Y-%m-%d")
+
+        def _worker():
+            try:
+                df = fetch_galadriel_scans_gdrive(heute)
+            except Exception:
+                df = None
+
+            def _zeit(v):
+                try:
+                    d = pd.to_datetime(v, errors="coerce")
+                    return d.strftime("%d.%m. %H:%M") if not pd.isna(d) else str(v or "")
+                except Exception:
+                    return str(v or "")
+
+            def _g(r, key):
+                return "" if (key not in r or pd.isna(r.get(key))) else str(r.get(key)).strip()
+
+            # nach Typ aufteilen: Express / Normal / Urbify (Spalten ohne Typ)
+            rows_ex, rows_no, rows_ur = [], [], []
+            if df is not None and not df.empty:
+                for _, r in df.iterrows():
+                    dup = "Ja" if _g(r, "moeglich_duplikat") in ("1", "1.0", "True", "true", "Ja", "ja") else ""
+                    zeile = (_g(r, "barcode"), _g(r, "station"),
+                             _zeit(r.get("zeitstempel", "")), dup)
+                    typ = _g(r, "typ").lower()
+                    if typ == "express":
+                        rows_ex.append(zeile)
+                    elif typ == "normal":
+                        rows_no.append(zeile)
+                    elif typ == "urbify":
+                        rows_ur.append(zeile)
+                    # andere Typen (z.B. "Unbekannt") werden keinem Tab zugeordnet
+
+            def _fill():
+                self.tab_gal_express.set_rows(rows_ex)
+                self.tab_gal_normal.set_rows(rows_no)
+                self.tab_gal_urbify.set_rows(rows_ur)
+            self.after(0, _fill)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     # ------------------------------------------------------------------ Hilfe
     def _show_help(self):
         win = tk.Toplevel(self)
@@ -10539,6 +10659,7 @@ class App(tk.Tk):
             return
         import datetime as _dt
         self.load_dhl_orca()
+        self.load_galadriel_async()   # Galadriel-Scans im selben Takt aktualisieren
         now = _dt.datetime.now().strftime("%H:%M")
         self.dhl_refresh_lbl.config(text=f"Zuletzt: {now}")
         self._schedule_dhl_refresh()
