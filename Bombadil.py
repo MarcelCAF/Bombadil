@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.91"
+VERSION = "1.0.92"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8297,14 +8297,14 @@ class App(tk.Tk):
         # 10b. Galadriel – DHL-Scans des Tages aus Google Drive (CSV), nach Typ aufgeteilt.
         #      Je Tab nur ein Typ → die Typ-Spalte entfällt (wäre redundant).
         def _galadriel_color(row):
-            # letzte Spalte = Duplikat-Markierung ("Ja"/"") → verdächtige Zeile orange
-            return "#ffe0b2" if str(row[-1]).strip() == "Ja" else None
-        _gal_cols = [("barcode", "Barcode", 240), ("station", "Station", 140),
-                     ("zeitstempel", "Zeit", 160), ("dup", "⚠ Duplikat?", 100)]
+            # letzte Spalte = Duplikat-Markierung ("Ja"/"") → verdächtige Zeile rot
+            return "#ff9999" if str(row[-1]).strip() == "Ja" else None
+        _gal_cols = [("barcode", "Barcode", 240), ("zeitstempel", "Zeit", 160),
+                     ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
         def _make_gal_tab(titel):
             return TableTab(self.nb, titel, _gal_cols, today_header=True,
                             row_color_fn=_galadriel_color,
-                            legend_items=[("#ffe0b2", "Mögliches Duplikat")])
+                            legend_items=[("#ff9999", "Mögliches Duplikat")])
         self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)")
         self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)")
         self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)")
@@ -10377,8 +10377,8 @@ class App(tk.Tk):
             if df is not None and not df.empty:
                 for _, r in df.iterrows():
                     dup = "Ja" if _g(r, "moeglich_duplikat") in ("1", "1.0", "True", "true", "Ja", "ja") else ""
-                    zeile = (_g(r, "barcode"), _g(r, "station"),
-                             _zeit(r.get("zeitstempel", "")), dup)
+                    zeile = (_g(r, "barcode"), _zeit(r.get("zeitstempel", "")),
+                             _g(r, "station"), dup)
                     typ = _g(r, "typ").lower()
                     if typ == "express":
                         rows_ex.append(zeile)
