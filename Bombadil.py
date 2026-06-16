@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.94"
+VERSION = "1.0.95"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -822,6 +822,59 @@ def fetch_galadriel_scans_gdrive(datum_str: str) -> "pd.DataFrame":
         return pd.DataFrame()
 
 
+def fetch_galadriel_urbify_counts() -> dict:
+    """Lädt ALLE Galadriel-Tages-CSVs aus dem Drive-Ordner und zählt je Tag die
+    Urbify-Scans (typ=Urbify, OHNE mögliche Duplikate). Gibt {date: count} zurück.
+
+    Für die Versand-Statistik: Urbify-Daten gibt es nur aus Galadriel (nicht
+    OrcaScan). Da Galadriel erst seit wenigen Tagen läuft, sind es wenige Dateien.
+    Quelle: OAuth-Token (drive.file) – wie fetch_galadriel_scans_gdrive.
+    Datum wird aus dem Dateinamen scans_YYYY-MM-DD.csv abgeleitet."""
+    import re as _re, datetime as _dt, io as _io
+    out: dict = {}
+    if not GDRIVE_AVAILABLE or not OAUTH_TOKEN_FILE.exists():
+        return out
+    try:
+        service = _get_oauth_drive_service()
+        res = service.files().list(
+            q=f"'{GDRIVE_FOLDER_GALADRIEL}' in parents "
+              f"and name contains 'scans_' and trashed = false",
+            fields="files(id, name)", pageSize=400,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+    except Exception:
+        return out
+    for f in files:
+        m = _re.search(r"scans_(\d{4}-\d{2}-\d{2})\.csv", f.get("name", ""))
+        if not m:
+            continue
+        try:
+            d = _dt.date.fromisoformat(m.group(1))
+        except Exception:
+            continue
+        try:
+            req = service.files().get_media(fileId=f["id"])
+            buf = _io.BytesIO()
+            dl  = MediaIoBaseDownload(buf, req)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            buf.seek(0)
+            df = pd.read_csv(buf)
+        except Exception:
+            continue
+        if df.empty or "typ" not in df.columns:
+            continue
+        mask = df["typ"].astype(str).str.strip().str.lower() == "urbify"
+        if "moeglich_duplikat" in df.columns:
+            dup = (df["moeglich_duplikat"].astype(str).str.strip()
+                   .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
+            mask = mask & ~dup
+        out[d] = int(mask.sum())
+    return out
+
+
 def _delete_drive_files_by_name(filename: str, folder_id: str):
     """Löscht alle Dateien mit dem angegebenen Namen im Drive-Ordner."""
     if not GDRIVE_AVAILABLE:
@@ -916,7 +969,7 @@ def load_statistik_cache(prefer_drive: bool = False) -> "dict | None":
     prefer_drive=True (Kollegen): Drive zuerst (gemeinsame Wahrheit vom
     Master-PC), lokal nur als Offline-Fallback."""
     import json as _json
-    MIN_VERSION = 5   # ältere Caches: alte Mai-Korrektur → verwerfen, neu rechnen
+    MIN_VERSION = 6   # ab v6: DHL-Tupel ohne Same/Next day, dafür Urbify → alte verwerfen
 
     def _valid(data):
         return bool(data) and ("pu" in data or "dhl" in data) \
@@ -976,7 +1029,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
         return [list(r) for r in rows] if rows else []
 
     return {
-        "version":   5,
+        "version":   6,
         "erstellt":  _dt.date.today().isoformat(),
         "uhrzeit":   _dt.datetime.now().strftime("%H:%M"),
         "heute":     heute or {},
@@ -1729,6 +1782,7 @@ def add_working_days(d: date, n: int) -> date:
 
 import threading as _threading
 _OAUTH_LOCK = _threading.Lock()
+_OAUTH_CREDS = None   # geteilter Credentials-Cache (verhindert parallele Token-Refreshes)
 
 def _get_oauth_drive_service():
     """
@@ -1755,11 +1809,15 @@ def _get_oauth_drive_service():
 
     # Lock verhindert parallele OAuth-Flows (sonst 5x dieselbe URL-Aufforderung,
     # wenn mehrere Background-Threads gleichzeitig Drive nutzen wollen).
+    global _OAUTH_CREDS
     with _OAUTH_LOCK:
-        creds = None
+        # Geteiltes Credentials-Objekt wiederverwenden (alle Drive-Zugriffe teilen
+        # dasselbe creds → max. EIN Refresh wenn abgelaufen, keine parallelen
+        # Refresh-Kollisionen, kein refresh_token-Rotations-Konflikt).
+        creds = _OAUTH_CREDS
 
-        # Gespeichertes Token laden (falls vorhanden)
-        if OAUTH_TOKEN_FILE.exists():
+        # Beim allerersten Mal: gespeichertes Token von Disk laden
+        if creds is None and OAUTH_TOKEN_FILE.exists():
             try:
                 with open(OAUTH_TOKEN_FILE, "rb") as fh:
                     creds = _pickle.load(fh)
@@ -1770,13 +1828,28 @@ def _get_oauth_drive_service():
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(_GAuthRequest())
-            except Exception:
-                # Token widerrufen / abgelaufen → löschen, neu einloggen
-                try:
-                    OAUTH_TOKEN_FILE.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                creds = None
+            except Exception as _refresh_err:
+                _msg = str(_refresh_err).lower()
+                _wirklich_ungueltig = (
+                    "invalid_grant" in _msg
+                    or "token has been expired or revoked" in _msg
+                    or "revoked" in _msg
+                    or "invalid_rapt" in _msg
+                )
+                if _wirklich_ungueltig:
+                    # Token wirklich widerrufen/abgelaufen → löschen, neu einloggen
+                    try:
+                        OAUTH_TOKEN_FILE.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    _OAUTH_CREDS = None
+                    creds = None
+                else:
+                    # Nur vorübergehender Fehler (Netzwerk, Rate-Limit): Token BEHALTEN,
+                    # KEIN Browser-Login erzwingen. Fehler nach oben reichen – der
+                    # Aufrufer fängt ihn ab und liefert vorerst leere Daten.
+                    _OAUTH_CREDS = creds
+                    raise
 
         if not creds or not creds.valid:
             # Kein gültiges Token → Browser öffnet sich für neuen Login
@@ -1785,9 +1858,13 @@ def _get_oauth_drive_service():
             )
             creds = flow.run_local_server(port=0)
 
-        # Token speichern für nächsten Start
-        with open(OAUTH_TOKEN_FILE, "wb") as fh:
-            _pickle.dump(creds, fh)
+        # Token speichern (Disk + Cache synchron halten)
+        try:
+            with open(OAUTH_TOKEN_FILE, "wb") as fh:
+                _pickle.dump(creds, fh)
+        except Exception:
+            pass
+        _OAUTH_CREDS = creds
 
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
@@ -3613,8 +3690,7 @@ class StatistikTab:
     _COL_NORMAL   = "#f9a825"   # gelb  – DHL Normal
     _COL_EXPRESS  = "#b71c1c"   # rot   – DHL Express
     _COL_ABHOLUNG = "#2e7d32"   # grün  – Pickup
-    _COL_SAMEDAY  = "#1565c0"   # blau  – Same day delivery
-    _COL_NEXTDAY  = "#6a1b9a"   # lila  – Next day delivery
+    _COL_URBIFY   = "#00838f"   # petrol/türkis – Urbify (Galadriel)
     _COL_BG       = "#f0f2f5"
 
     def __init__(self, parent, start_loading=None, stop_loading=None,
@@ -3647,6 +3723,8 @@ class StatistikTab:
         self._dhl_view_mode = tk.StringVar(value="weekly")
         self._dhl_loading   = False
         self._dhl_loaded_date = None   # Datum des letzten DHL-Loads (gegen Einfrieren bei Dauerbetrieb)
+        self._urbify_counts: dict = {}  # {date: anzahl} – Urbify-Scans aus Galadriel-CSVs
+        self._urbify_loaded_date = None  # Tagesstempel: Urbify-CSVs 1×/Tag laden
 
         # ── Scrollbarer Container (geteilt) ──────────────────────────
         self.frame = tk.Frame(parent, bg=self._COL_BG)
@@ -3857,7 +3935,7 @@ class StatistikTab:
 
         hdr_dhl = tk.Frame(self._inner, bg=self._COL_BG)
         hdr_dhl.pack(fill="x", padx=16, pady=(10, 4))
-        tk.Label(hdr_dhl, text="📊  DHL Statistik",
+        tk.Label(hdr_dhl, text="📊  Versand Statistik",
                  font=("Segoe UI", 12, "bold"),
                  bg=self._COL_BG, fg="#2c3e50").pack(side="left")
         self._dhl_status_lbl = tk.Label(hdr_dhl, text="Noch nicht geladen.",
@@ -3869,8 +3947,7 @@ class StatistikTab:
         for color, text in [(self._COL_NORMAL,   "🚛 DHL Normal"),
                             (self._COL_EXPRESS,  "🚚 DHL Express"),
                             (self._COL_ABHOLUNG, "🏃 Pickup"),
-                            (self._COL_SAMEDAY,  "🔵 Same day"),
-                            (self._COL_NEXTDAY,  "🟣 Next day")]:
+                            (self._COL_URBIFY,   "🛵 Urbify")]:
             tk.Frame(leg_dhl, bg=color, width=14, height=14, relief="flat").pack(side="left")
             tk.Label(leg_dhl, text=f" {text}   ", font=("Segoe UI", 9),
                      bg=self._COL_BG, fg="#2c3e50").pack(side="left")
@@ -3917,8 +3994,7 @@ class StatistikTab:
         self._lbl_normal_woche   = _card_dhl(cards_dhl, self._COL_NORMAL,   "🚛", "DHL Normal",  "Diese Woche", "#fff9c4")
         self._lbl_express_woche  = _card_dhl(cards_dhl, self._COL_EXPRESS,  "🚚", "DHL Express", "Diese Woche", "#ef9a9a")
         self._lbl_abholung_woche = _card_dhl(cards_dhl, self._COL_ABHOLUNG, "🏃", "Pickup",      "Diese Woche", "#a5d6a7")
-        self._lbl_sameday_woche  = _card_dhl(cards_dhl, self._COL_SAMEDAY,  "🔵", "Same day",    "Diese Woche", "#bbdefb")
-        self._lbl_nextday_woche  = _card_dhl(cards_dhl, self._COL_NEXTDAY,  "🟣", "Next day",    "Diese Woche", "#e1bee7")
+        self._lbl_urbify_woche   = _card_dhl(cards_dhl, self._COL_URBIFY,   "🛵", "Urbify",      "Diese Woche", "#b2ebf2")
 
         tk.Frame(self._inner, bg="#dde2e8", height=1).pack(fill="x", padx=16, pady=(0, 8))
 
@@ -4146,8 +4222,7 @@ class StatistikTab:
                 self._lbl_normal_woche.config(  text=str(tiles_dhl.get("normal_woche",  "–")))
                 self._lbl_express_woche.config( text=str(tiles_dhl.get("express_woche", "–")))
                 self._lbl_abholung_woche.config(text=str(tiles_dhl.get("pickup_woche",  "–")))
-                self._lbl_sameday_woche.config( text=str(tiles_dhl.get("sameday_woche", "–")))
-                self._lbl_nextday_woche.config( text=str(tiles_dhl.get("nextday_woche", "–")))
+                self._lbl_urbify_woche.config(  text=str(tiles_dhl.get("urbify_woche",  "–")))
             self._dhl_redraw_chart()
         except Exception as _e:
             print(f"[Cache] Fehler beim Anwenden: {_e}")
@@ -4207,8 +4282,7 @@ class StatistikTab:
             "normal_woche":  _txt(self._lbl_normal_woche),
             "express_woche": _txt(self._lbl_express_woche),
             "pickup_woche":  _txt(self._lbl_abholung_woche),
-            "sameday_woche": _txt(self._lbl_sameday_woche),
-            "nextday_woche": _txt(self._lbl_nextday_woche),
+            "urbify_woche":  _txt(self._lbl_urbify_woche),
         }
         heute = self._get_heute_cb()
         cache = build_statistik_cache(
@@ -4291,11 +4365,25 @@ class StatistikTab:
                 # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
                 express_df = apply_dhl_express_korrektur(express_df)
 
+                # 3. Urbify-Zählung aus den Galadriel-CSVs (eigene Quelle, nicht OrcaScan).
+                #    Nur EINMAL pro Tag laden (lädt alle Galadriel-CSVs) – spart Drive-/
+                #    OAuth-Zugriffe. urbify_counts=None → _dhl_on_loaded behält den
+                #    bestehenden Wert.
+                import datetime as _dt_u
+                if getattr(self, "_urbify_loaded_date", None) != _dt_u.date.today():
+                    try:
+                        urbify_counts = fetch_galadriel_urbify_counts()
+                        self._urbify_loaded_date = _dt_u.date.today()
+                    except Exception:
+                        urbify_counts = None
+                else:
+                    urbify_counts = None   # heute schon geladen → bestehende Werte behalten
+
                 # drive_ok bleibt für den Cache-Schutz relevant: Live allein
                 # deckt nur die letzten Tage ab; für vollständige Historie muss
                 # auch das Drive-Archiv geladen worden sein.
-                self.frame.after(0, lambda n=normal_df, e=express_df, ok=drive_ok:
-                                 self._dhl_on_loaded(n, e, drive_ok=ok))
+                self.frame.after(0, lambda n=normal_df, e=express_df, ok=drive_ok, u=urbify_counts:
+                                 self._dhl_on_loaded(n, e, drive_ok=ok, urbify_counts=u))
             except Exception as ex:
                 self.frame.after(0, lambda err=ex: self._dhl_on_error(err))
 
@@ -4897,12 +4985,14 @@ class StatistikTab:
 
     # ── DHL interne Methoden ─────────────────────────────────────────
 
-    def _dhl_on_loaded(self, normal_df, express_df, drive_ok=True):
+    def _dhl_on_loaded(self, normal_df, express_df, drive_ok=True, urbify_counts=None):
         self._dhl_loading  = False
         self._dhl_drive_ok = drive_ok   # False = Drive war nicht erreichbar
         self._dhl_loaded_date = date.today()   # Tagesstempel: heute wurde DHL geladen
         self._normal_df  = normal_df  if not normal_df.empty  else None
         self._express_df = express_df if not express_df.empty else None
+        if urbify_counts is not None:
+            self._urbify_counts = urbify_counts
         n_n = len(normal_df)  if not normal_df.empty  else 0
         n_e = len(express_df) if not express_df.empty else 0
         warn = "  ⚠ Drive nicht erreichbar – nur NAS" if not drive_ok else ""
@@ -5034,33 +5124,29 @@ class StatistikTab:
                     tour_bcs |= bc_set
             return len(db_bcs | tour_bcs)
 
-        # ── Same day / Next day delivery ────────────────────────────
-        # Noch keine Datenquelle vorhanden → liefern aktuell 0.
-        # Sobald die Daten existieren, hier die echte Zählung einbauen
-        # (analog zu count(...) / count_pu_in_range(...)).
-        def count_sameday_in_range(start, end=None):
-            return 0
-
-        def count_nextday_in_range(start, end=None):
-            return 0
+        # ── Urbify-Lieferungen (aus Galadriel-CSVs) ─────────────────
+        def count_urbify_in_range(start, end=None):
+            """Urbify-Scans aus den Galadriel-CSVs (Tages-Zählung, ohne Duplikate)."""
+            total = 0
+            for d, c in self._urbify_counts.items():
+                if d >= start and (end is None or d < end):
+                    total += c
+            return total
 
         # Kacheln
         n_woche  = (count(normal_dates,   week_start)  + count(express_dates,  week_start)
-                    + count_pu_in_range(week_start)
-                    + count_sameday_in_range(week_start) + count_nextday_in_range(week_start))
+                    + count_pu_in_range(week_start) + count_urbify_in_range(week_start))
         n_monat  = (count(normal_dates,   month_start) + count(express_dates,  month_start)
-                    + count_pu_in_range(month_start)
-                    + count_sameday_in_range(month_start) + count_nextday_in_range(month_start))
+                    + count_pu_in_range(month_start) + count_urbify_in_range(month_start))
         self._lbl_gesamt_woche.config(   text=str(n_woche))
         self._lbl_gesamt_monat.config(   text=str(n_monat))
         self._lbl_normal_woche.config(   text=str(count(normal_dates,   week_start)))
         self._lbl_express_woche.config(  text=str(count(express_dates,  week_start)))
         self._lbl_abholung_woche.config( text=str(count_pu_in_range(week_start)))
-        self._lbl_sameday_woche.config(  text=str(count_sameday_in_range(week_start)))
-        self._lbl_nextday_woche.config(  text=str(count_nextday_in_range(week_start)))
+        self._lbl_urbify_woche.config(   text=str(count_urbify_in_range(week_start)))
 
         # Wochendaten (letzte 4 Kalenderwochen)
-        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday)
+        # Tupel-Layout: (label, normal, express, pickup, urbify)
         weekly = []
         for i in range(3, -1, -1):
             ws = week_start - timedelta(weeks=i)
@@ -5069,11 +5155,11 @@ class StatistikTab:
             lbl = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
             weekly.append((lbl, count(normal_dates, ws, we),
                            count(express_dates, ws, we), count_pu_in_range(ws, we),
-                           count_sameday_in_range(ws, we), count_nextday_in_range(ws, we)))
+                           count_urbify_in_range(ws, we)))
         self._dhl_weekly_data = weekly
 
         # Tagesdaten (letzte 28 Tage)
-        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday, weekday)
+        # Tupel-Layout: (label, normal, express, pickup, urbify, weekday)
         daily = []
         for i in range(27, -1, -1):
             d      = today - timedelta(days=i)
@@ -5082,13 +5168,12 @@ class StatistikTab:
                           count(normal_dates,   d, d_next),
                           count(express_dates,  d, d_next),
                           count_pu_in_range(d, d_next),
-                          count_sameday_in_range(d, d_next),
-                          count_nextday_in_range(d, d_next),
+                          count_urbify_in_range(d, d_next),
                           d.weekday()))
         self._dhl_daily_data = daily
 
         # Monatsdaten (letzte 6 Monate)
-        # Tupel-Layout: (label, normal, express, pickup, sameday, nextday, mkey)
+        # Tupel-Layout: (label, normal, express, pickup, urbify, mkey)
         monthly = []
         for i in range(5, -1, -1):
             m_year  = today.year
@@ -5108,8 +5193,7 @@ class StatistikTab:
                             count(normal_dates,   ms, me),
                             count(express_dates,  ms, me),
                             pu_m,
-                            count_sameday_in_range(ms, me),
-                            count_nextday_in_range(ms, me),
+                            count_urbify_in_range(ms, me),
                             mkey))    # Monatsschlüssel für Ziele
         self._dhl_monthly_data = monthly
 
@@ -5117,8 +5201,7 @@ class StatistikTab:
         # bleiben gültig – greifen auf normal_dates/express_dates etc. zu).
         self._dhl_count          = count
         self._dhl_count_pu       = count_pu_in_range
-        self._dhl_count_sameday  = count_sameday_in_range
-        self._dhl_count_nextday  = count_nextday_in_range
+        self._dhl_count_urbify   = count_urbify_in_range
         self._dhl_normal_dates   = normal_dates
         self._dhl_express_dates  = express_dates
 
@@ -5189,21 +5272,20 @@ class StatistikTab:
         gran, buckets = self._make_buckets(d_from, d_to)
         self._dhl_range_granularity = gran
         data = []
-        sum_n = sum_e = sum_p = sum_s = sum_x = 0
+        sum_n = sum_e = sum_p = sum_u = 0
         for label, start, end, wd in buckets:
             n = self._dhl_count(self._dhl_normal_dates,  start, end)
             e = self._dhl_count(self._dhl_express_dates, start, end)
             p = self._dhl_count_pu(start, end)
-            s = self._dhl_count_sameday(start, end)
-            x = self._dhl_count_nextday(start, end)
-            sum_n += n; sum_e += e; sum_p += p; sum_s += s; sum_x += x
+            u = self._dhl_count_urbify(start, end)
+            sum_n += n; sum_e += e; sum_p += p; sum_u += u
             if gran == "daily":
-                data.append((label, n, e, p, s, x, wd))
+                data.append((label, n, e, p, u, wd))
             else:
-                data.append((label, n, e, p, s, x))
+                data.append((label, n, e, p, u))
         self._dhl_range_data = data
-        self._dhl_range_sum  = (sum_n, sum_e, sum_p, sum_s, sum_x)
-        ges = sum_n + sum_e + sum_p + sum_s + sum_x
+        self._dhl_range_sum  = (sum_n, sum_e, sum_p, sum_u)
+        ges = sum_n + sum_e + sum_p + sum_u
         hint = ""
         try:
             if (not self._dhl_normal_dates.empty and
@@ -5212,7 +5294,7 @@ class StatistikTab:
         except Exception:
             pass
         self._dhl_range_sum_lbl.config(
-            text=f"Σ {ges}  (Normal {sum_n} · Express {sum_e} · Pickup {sum_p}){hint}")
+            text=f"Σ {ges}  (Normal {sum_n} · Express {sum_e} · Pickup {sum_p} · Urbify {sum_u}){hint}")
 
     def _dhl_range_show(self):
         """'Anzeigen'-Klick: Datumswerte übernehmen und Chart aktualisieren."""
@@ -5314,15 +5396,15 @@ class StatistikTab:
         dhl_goals = {}
         if view == "monthly":
             dhl_goals = _load_monthly_goals("dhl")
-            max_sum  = max((row[1] + row[2] + row[3] + row[4] + row[5]) for row in data) or 1
+            max_sum  = max((row[1] + row[2] + row[3] + row[4]) for row in data) or 1
             max_goal = max(dhl_goals.values()) if dhl_goals else 0
             max_cnt  = max(max_sum, max_goal, 1)
         else:
-            max_cnt = max(max(row[1], row[2], row[3], row[4], row[5]) for row in data) or 1
+            max_cnt = max(max(row[1], row[2], row[3], row[4]) for row in data) or 1
 
-        # 5 Balken pro Gruppe (Normal/Express/Pickup/Same day/Next day)
+        # 4 Balken pro Gruppe (Normal/Express/Pickup/Urbify)
         # In Monatsansicht zusätzlich einen "Gesamt"-Balken
-        N_BARS    = 5
+        N_BARS    = 4
         SUM_BAR_H = 12
         SUM_GAP   = 4
         if view == "monthly":
@@ -5332,13 +5414,13 @@ class StatistikTab:
 
         for i, row in enumerate(data):
             label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
-            n_sameday, n_nextday = row[4], row[5]
-            mkey = row[6] if len(row) > 6 else None
+            n_urbify = row[4]
+            mkey = row[5] if len(row) > 5 else None
             y0    = PAD_TOP + i * (group_h + GROUP_GAP)
             y_mid = y0 + group_h // 2
 
             # Gesamt rechts oben anzeigen
-            n_ges = n_normal + n_express + n_abholung + n_sameday + n_nextday
+            n_ges = n_normal + n_express + n_abholung + n_urbify
             c.create_text(PAD_LEFT - 8, y_mid - 6, text=label,
                           anchor="e", font=("Segoe UI", 9, "bold"), fill="#2c3e50")
             c.create_text(PAD_LEFT - 8, y_mid + 8, text=f"∑ {n_ges}",
@@ -5380,34 +5462,22 @@ class StatistikTab:
                           text=f"🏃 {n_abholung} PU", anchor="w",
                           font=("Segoe UI", 9, "bold"), fill="#1b5e20")
 
-            # Bar 4: Same day delivery
+            # Bar 4: Urbify
             y4  = y0 + 3 * (BAR_H + BAR_GAP)
-            bw4 = max(int(n_sameday / max_cnt * bar_area_w), 4) if n_sameday else 0
+            bw4 = max(int(n_urbify / max_cnt * bar_area_w), 4) if n_urbify else 0
             c.create_rectangle(PAD_LEFT, y4, PAD_LEFT + bar_area_w, y4 + BAR_H,
-                                fill="#bbdefb", outline="")
+                                fill="#b2ebf2", outline="")
             if bw4:
                 c.create_rectangle(PAD_LEFT, y4, PAD_LEFT + bw4, y4 + BAR_H,
-                                   fill=self._COL_SAMEDAY, outline="")
+                                   fill=self._COL_URBIFY, outline="")
             c.create_text(PAD_LEFT + bw4 + 6, y4 + BAR_H // 2,
-                          text=f"🔵 {n_sameday}", anchor="w",
-                          font=("Segoe UI", 9, "bold"), fill="#0d47a1")
-
-            # Bar 5: Next day delivery
-            y5  = y0 + 4 * (BAR_H + BAR_GAP)
-            bw5 = max(int(n_nextday / max_cnt * bar_area_w), 4) if n_nextday else 0
-            c.create_rectangle(PAD_LEFT, y5, PAD_LEFT + bar_area_w, y5 + BAR_H,
-                                fill="#e1bee7", outline="")
-            if bw5:
-                c.create_rectangle(PAD_LEFT, y5, PAD_LEFT + bw5, y5 + BAR_H,
-                                   fill=self._COL_NEXTDAY, outline="")
-            c.create_text(PAD_LEFT + bw5 + 6, y5 + BAR_H // 2,
-                          text=f"🟣 {n_nextday}", anchor="w",
-                          font=("Segoe UI", 9, "bold"), fill="#4a148c")
+                          text=f"🛵 {n_urbify}", anchor="w",
+                          font=("Segoe UI", 9, "bold"), fill="#00838f")
 
             # ── Gesamt-Balken + Ziel-Linie (nur Monatsansicht) ─────────────
             if view == "monthly":
-                n_sum = n_normal + n_express + n_abholung + n_sameday + n_nextday
-                y_sum = y5 + BAR_H + SUM_GAP
+                n_sum = n_normal + n_express + n_abholung + n_urbify
+                y_sum = y4 + BAR_H + SUM_GAP
                 bw_s  = max(int(n_sum / max_cnt * bar_area_w), 4) if n_sum else 0
                 # Hintergrund + dunkler Gesamt-Balken
                 c.create_rectangle(PAD_LEFT, y_sum, PAD_LEFT + bar_area_w,
@@ -5492,12 +5562,12 @@ class StatistikTab:
         chart_h = canvas_h - PAD_TOP - PAD_BOTTOM
         n_days  = len(data)
         group_w = chart_w / n_days
-        # 5 Balken pro Tag: schmaler, mittig gruppiert
-        bar_w   = max(int(group_w * 0.15), 2)
+        # 4 Balken pro Tag: schmaler, mittig gruppiert
+        bar_w   = max(int(group_w * 0.18), 2)
         bar_gap = max(int(group_w * 0.02), 1)
         base_y  = canvas_h - PAD_BOTTOM
 
-        max_cnt = max((max(na, nb, nc, nd, ne) for _, na, nb, nc, nd, ne, _ in data),
+        max_cnt = max((max(na, nb, nc, nd) for _, na, nb, nc, nd, _ in data),
                       default=1) or 1
 
         y_half = PAD_TOP + chart_h // 2
@@ -5506,7 +5576,7 @@ class StatistikTab:
         c.create_text(PAD_LEFT - 2, y_half, text=str(max_cnt // 2),
                       anchor="e", font=("Segoe UI", 7), fill="#bbb")
 
-        for i, (label, n_normal, n_express, n_abholung, n_sameday, n_nextday, weekday) in enumerate(data):
+        for i, (label, n_normal, n_express, n_abholung, n_urbify, weekday) in enumerate(data):
             gx = PAD_LEFT + (i + 0.5) * group_w
 
             if weekday == 0 and i > 0:
@@ -5514,8 +5584,8 @@ class StatistikTab:
                 c.create_line(x_sep, PAD_TOP, x_sep, base_y,
                               fill="#dde2e8", dash=(2, 3))
 
-            # 5 Balken nebeneinander, mittig zentriert
-            total_w = 5 * bar_w + 4 * bar_gap
+            # 4 Balken nebeneinander, mittig zentriert
+            total_w = 4 * bar_w + 3 * bar_gap
             x_start = int(gx - total_w / 2)
 
             # Bar 1: DHL Normal
@@ -5545,35 +5615,25 @@ class StatistikTab:
                 c.create_rectangle(x3_l, base_y - h3, x3_r, base_y,
                                    fill=self._COL_ABHOLUNG, outline="")
 
-            # Bar 4: Same day
+            # Bar 4: Urbify
             x4_l = x3_r + bar_gap
             x4_r = x4_l + bar_w
-            h4   = max(int(n_sameday / max_cnt * chart_h), 1) if n_sameday else 0
-            c.create_rectangle(x4_l, PAD_TOP, x4_r, base_y, fill="#bbdefb", outline="")
+            h4   = max(int(n_urbify / max_cnt * chart_h), 1) if n_urbify else 0
+            c.create_rectangle(x4_l, PAD_TOP, x4_r, base_y, fill="#b2ebf2", outline="")
             if h4:
                 c.create_rectangle(x4_l, base_y - h4, x4_r, base_y,
-                                   fill=self._COL_SAMEDAY, outline="")
-
-            # Bar 5: Next day
-            x5_l = x4_r + bar_gap
-            x5_r = x5_l + bar_w
-            h5   = max(int(n_nextday / max_cnt * chart_h), 1) if n_nextday else 0
-            c.create_rectangle(x5_l, PAD_TOP, x5_r, base_y, fill="#e1bee7", outline="")
-            if h5:
-                c.create_rectangle(x5_l, base_y - h5, x5_r, base_y,
-                                   fill=self._COL_NEXTDAY, outline="")
+                                   fill=self._COL_URBIFY, outline="")
 
             # Einzelzahlen über jedem Balken – nur wenn genug Platz, sonst
             # überlappen sie. Bei vielen Tagen stattdessen die Gesamtsumme.
-            n_total = n_normal + n_express + n_abholung + n_sameday + n_nextday
+            n_total = n_normal + n_express + n_abholung + n_urbify
             zeige_einzel = (bar_w + bar_gap) >= 13
             if zeige_einzel:
                 _bars = [
                     ((x1_l + x1_r) // 2, n_normal,   h1, "#f57f17"),
                     ((x2_l + x2_r) // 2, n_express,  h2, "#7f0000"),
                     ((x3_l + x3_r) // 2, n_abholung, h3, self._COL_ABHOLUNG),
-                    ((x4_l + x4_r) // 2, n_sameday,  h4, self._COL_SAMEDAY),
-                    ((x5_l + x5_r) // 2, n_nextday,  h5, self._COL_NEXTDAY),
+                    ((x4_l + x4_r) // 2, n_urbify,   h4, self._COL_URBIFY),
                 ]
                 for bx, val, bh, col in _bars:
                     if val:
@@ -5581,8 +5641,8 @@ class StatistikTab:
                                       anchor="s", font=("Segoe UI", 7, "bold"),
                                       fill=col)
             elif n_total:
-                max_h = max(h1, h2, h3, h4, h5)
-                x_mid = (x1_l + x5_r) // 2
+                max_h = max(h1, h2, h3, h4)
+                x_mid = (x1_l + x4_r) // 2
                 c.create_text(x_mid, min(base_y - max_h - 3, base_y - 4),
                               text=f"∑ {n_total}", anchor="s",
                               font=("Segoe UI", 7), fill="#444")
@@ -9445,9 +9505,9 @@ class App(tk.Tk):
         SIDE_BG   = "#1a2744"
         HOVER_BG  = "#243a5e"
 
-        # Abschnitts-Überschrift
+        # Abschnitts-Überschrift (im scrollbaren Menübereich _nav_inner)
         def _section_label(text):
-            tk.Label(self.sidebar, text=text,
+            tk.Label(self._nav_inner, text=text,
                      font=("Segoe UI", 7, "bold"),
                      bg=SIDE_BG, fg="#4a7a9b",
                      anchor="w", padx=18,
@@ -9455,7 +9515,7 @@ class App(tk.Tk):
 
         # Trennlinie
         def _sep():
-            tk.Frame(self.sidebar, bg="#243a5e", height=1
+            tk.Frame(self._nav_inner, bg="#243a5e", height=1
                      ).pack(fill="x", padx=14, pady=4)
 
         self._sidebar_btns = {}
@@ -9527,7 +9587,51 @@ class App(tk.Tk):
         INDICATOR   = "#4a9fd4"   # helles Blau – aktiver Markierungsreiter
         ACTIVE_BG   = "#243d5c"   # Hintergrund aktiver Eintrag
 
-        tk.Frame(self.sidebar, bg=SIDE_BG, height=8).pack()  # Abstand oben
+        # ── Steuerung ZUERST unten fixieren (bleibt bei jeder Fenstergröße sichtbar) ──
+        ctrl = tk.Frame(self.sidebar, bg=SIDE_BG)
+        ctrl.pack(side="bottom", fill="x")
+        tk.Frame(ctrl, bg="#243a5e", height=1).pack(fill="x", padx=14, pady=(4, 4))
+
+        def _ctrl_btn(text, cmd, color):
+            b = tk.Button(
+                ctrl, text=text, command=cmd,
+                bg=color, fg="white", relief="flat",
+                font=("Segoe UI", 9, "bold"), cursor="hand2",
+                activebackground=color, activeforeground="white",
+                padx=8, pady=5, anchor="w",
+            )
+            b.pack(fill="x", padx=10, pady=2)
+            return b
+
+        _ctrl_btn("🔄  Neu laden (F5)", self.reload, "#3d566e")
+        if ADMIN_MODE:
+            _ctrl_btn("🧹  Cleanup", lambda: self.run_cleanup_async(dry_run=False), "#8e44ad")
+        tk.Frame(ctrl, bg=SIDE_BG, height=6).pack()  # kleiner Abstand unten
+
+        # ── Scrollbarer Menübereich (nimmt den restlichen Platz; scrollt bei
+        #    kleinem Fenster, damit alle Einträge erreichbar bleiben) ──────────
+        _nav_canvas = tk.Canvas(self.sidebar, bg=SIDE_BG, highlightthickness=0)
+        _nav_scroll = tk.Scrollbar(self.sidebar, orient="vertical",
+                                   command=_nav_canvas.yview, width=10)
+        _nav_canvas.configure(yscrollcommand=_nav_scroll.set)
+        _nav_scroll.pack(side="right", fill="y")
+        _nav_canvas.pack(side="left", fill="both", expand=True)
+        self._nav_inner = tk.Frame(_nav_canvas, bg=SIDE_BG)
+        _nav_win = _nav_canvas.create_window((0, 0), window=self._nav_inner, anchor="nw")
+
+        def _on_nav_inner_cfg(e):
+            _nav_canvas.configure(scrollregion=_nav_canvas.bbox("all"))
+        def _on_nav_canvas_cfg(e):
+            _nav_canvas.itemconfig(_nav_win, width=e.width)
+        self._nav_inner.bind("<Configure>", _on_nav_inner_cfg)
+        _nav_canvas.bind("<Configure>", _on_nav_canvas_cfg)
+
+        def _on_nav_wheel(e):
+            _nav_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        self._nav_wheel_fn = _on_nav_wheel
+        _nav_canvas.bind("<MouseWheel>", _on_nav_wheel)
+
+        tk.Frame(self._nav_inner, bg=SIDE_BG, height=8).pack()  # Abstand oben
 
         for item in ITEMS:
             if item is None:
@@ -9540,7 +9644,7 @@ class App(tk.Tk):
             key, text, frame, tooltip = item
 
             # Zeilen-Container
-            row = tk.Frame(self.sidebar, bg=SIDE_BG, cursor="hand2")
+            row = tk.Frame(self._nav_inner, bg=SIDE_BG, cursor="hand2")
             row.pack(fill="x")
 
             # Markierungsstreifen links (4 px breit, zunächst unsichtbar)
@@ -9584,27 +9688,13 @@ class App(tk.Tk):
             # (row, indicator, lbl) speichern für _select_tab
             self._sidebar_btns[key] = (row, indicator, lbl)
 
-        # ── Steuerung (unterer Bereich der Sidebar) ─────────────────────
-        # Platzhalter der die Steuerung nach unten schiebt
-        spacer = tk.Frame(self.sidebar, bg=SIDE_BG)
-        spacer.pack(fill="both", expand=True)
-
-        tk.Frame(self.sidebar, bg="#243a5e", height=1).pack(fill="x", padx=14, pady=(0, 4))
-
-        def _ctrl_btn(text, cmd, color):
-            b = tk.Button(
-                self.sidebar, text=text, command=cmd,
-                bg=color, fg="white", relief="flat",
-                font=("Segoe UI", 9, "bold"), cursor="hand2",
-                activebackground=color, activeforeground="white",
-                padx=8, pady=5, anchor="w",
-            )
-            b.pack(fill="x", padx=10, pady=2)
-            return b
-
-        _ctrl_btn("🔄  Neu laden (F5)", self.reload, "#3d566e")
-        if ADMIN_MODE:
-            _ctrl_btn("🧹  Cleanup", lambda: self.run_cleanup_async(dry_run=False), "#8e44ad")
+        # Mausrad-Scrolling auch über den Menü-Einträgen ermöglichen
+        # (sonst scrollt das Rad nur über dem leeren Canvas-Bereich)
+        def _bind_wheel_recursive(widget):
+            widget.bind("<MouseWheel>", self._nav_wheel_fn)
+            for ch in widget.winfo_children():
+                _bind_wheel_recursive(ch)
+        _bind_wheel_recursive(self._nav_inner)
 
     def _flash_tile(self, count_lbl):
         """Lässt den Zähler kurz hell aufleuchten wenn sich der Wert geändert hat."""
