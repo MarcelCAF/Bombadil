@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.95"
+VERSION = "1.0.96"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -7762,6 +7762,7 @@ class App(tk.Tk):
         self._n_dhl_heute    = 0   # DHL Normal für "Pakete heute"-Kachel
         self._n_dhl_express  = 0   # DHL Express für "Pakete heute"-Kachel
         self._n_pu_heute     = 0   # PU heute für "Pakete heute"-Kachel
+        self._n_urbify_heute = 0   # Urbify (Galadriel) für "Pakete heute"-Kachel
         self._pu_heute_detail = {}  # PU-Aufschlüsselung für Mobile-Dashboard
         self._n_pu_verpackt  = 0   # Davon Verpackt (PU) für Prozentanzeige
         self._last_load_time = 0.0 # Zeitpunkt letzter erfolgreicher Abholer_DB-Laden
@@ -8045,10 +8046,10 @@ class App(tk.Tk):
                  font=("Segoe UI", 11, "bold"),
                  bg="#f0f2f5", fg="#2c3e50").pack(side="left", padx=14)
 
-        # 3 farbige Karten nebeneinander
+        # 4 farbige Karten nebeneinander
         _bk_cards = tk.Frame(self._breakdown_panel, bg="#f0f2f5")
         _bk_cards.pack(fill="x", padx=20, pady=14)
-        for c in range(3):
+        for c in range(4):
             _bk_cards.columnconfigure(c, weight=1)
 
         def _bk_card(parent, col, title, color):
@@ -8066,6 +8067,7 @@ class App(tk.Tk):
         self._bk_dhl_normal_lbl  = _bk_card(_bk_cards, 0, "DHL Normal",  "#2471a3")
         self._bk_dhl_express_lbl = _bk_card(_bk_cards, 1, "DHL Express", "#1a5276")
         self._bk_pu_lbl          = _bk_card(_bk_cards, 2, "PU",          "#16a085")
+        self._bk_urbify_lbl      = _bk_card(_bk_cards, 3, "Urbify",      "#00838f")
 
         # ── Panel E: PU heute Breakdown ──────────────────────────────────
         self._pu_breakdown_panel = tk.Frame(self._bottom_container, bg="#f0f2f5")
@@ -8114,10 +8116,11 @@ class App(tk.Tk):
             start_loading=self._start_loading,
             stop_loading=self._stop_loading,
             get_heute=lambda: {
-                "pakete":      self._n_dhl_heute + self._n_dhl_express + self._n_pu_heute,
+                "pakete":      self._n_dhl_heute + self._n_dhl_express + self._n_pu_heute + self._n_urbify_heute,
                 "pu":          self._n_pu_heute,
                 "normal":      self._n_dhl_heute,
                 "express":     self._n_dhl_express,
+                "urbify":      self._n_urbify_heute,
                 "pu_detail":   self._pu_heute_detail,
             },
         )
@@ -8690,6 +8693,7 @@ class App(tk.Tk):
         self._bk_dhl_normal_lbl.config(text=str(n_dhl_normal))
         self._bk_dhl_express_lbl.config(text=str(n_dhl_express))
         self._bk_pu_lbl.config(text=str(n_pu))
+        self._bk_urbify_lbl.config(text=str(self._n_urbify_heute))
         self._chart_panel.pack_forget()
         self._detail_panel.pack_forget()
         self._pu_breakdown_panel.pack_forget()
@@ -10129,11 +10133,11 @@ class App(tk.Tk):
         self._progress.start(12)
 
     def _on_pu_count_change_pakete(self):
-        """Aktualisiert die Pakete-heute-Kachel: DHL Normal + DHL Express + PU."""
+        """Aktualisiert die Pakete-heute-Kachel: DHL Normal + DHL Express + PU + Urbify."""
         if "pakete_heute" not in self._tile_lbls:
             return
         n_pu = self._n_pu_heute
-        total = self._n_dhl_heute + self._n_dhl_express + n_pu
+        total = self._n_dhl_heute + self._n_dhl_express + n_pu + self._n_urbify_heute
         count_lbl = self._tile_lbls["pakete_heute"][0]
         old_val = count_lbl.cget("text")
         count_lbl.config(text=str(total))
@@ -10426,9 +10430,9 @@ class App(tk.Tk):
         self._enrich_pay_tours()
         self.tab_kissel.set_rows(r_kissel)
         self.tab_verpackt.set_rows(r_verpackt)
-        # Pakete heute = DHL Normal + DHL Express + PU heute
+        # Pakete heute = DHL Normal + DHL Express + PU heute + Urbify
         report_data["pakete_heute"] = (self._n_dhl_heute + self._n_dhl_express
-                                       + self._n_pu_heute)
+                                       + self._n_pu_heute + self._n_urbify_heute)
         self._update_tiles(report_data)
         self._refresh_unstimmigkeiten()
         self.title(f"Bombadil  v{VERSION}")
@@ -10524,10 +10528,15 @@ class App(tk.Tk):
                         rows_ur.append(zeile)
                     # andere Typen (z.B. "Unbekannt") werden keinem Tab zugeordnet
 
+            # Urbify-Pakete heute OHNE mögliche Duplikate (für "Pakete heute"-Kachel)
+            n_urbify = sum(1 for r in rows_ur if str(r[-1]).strip() != "Ja")
+
             def _fill():
                 self.tab_gal_express.set_rows(rows_ex)
                 self.tab_gal_normal.set_rows(rows_no)
                 self.tab_gal_urbify.set_rows(rows_ur)
+                self._n_urbify_heute = n_urbify
+                self._on_pu_count_change_pakete()   # Pakete-heute-Kachel aktualisieren
             self.after(0, _fill)
 
         threading.Thread(target=_worker, daemon=True).start()
