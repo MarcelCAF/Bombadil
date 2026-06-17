@@ -82,7 +82,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.96"
+VERSION = "1.0.97"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -7092,6 +7092,21 @@ class PickupHeuteTab:
         else:
             frage = (f"Tour 2 jetzt auf {jetzt} Uhr setzen?\n\n"
                      f"{n} verpackte Pakete werden Tour 2 zugeordnet.")
+        # Zusatz-Warnung: Tour 1 wurde gerade erst gestempelt (verhindert das
+        # versehentliche gleichzeitige Stempeln von T1 und T2).
+        _t1_str = tz.get("t1")
+        if _t1_str:
+            try:
+                _now  = _dt.datetime.now()
+                _t1dt = _now.replace(hour=int(_t1_str[:2]), minute=int(_t1_str[3:5]),
+                                     second=0, microsecond=0)
+                _diff = (_now - _t1dt).total_seconds() / 60.0
+                if 0 <= _diff < 30:
+                    frage = (f"⚠ Tour 1 wurde erst vor {int(_diff)} Minute(n) "
+                             f"gestempelt ({_t1_str} Uhr)!\n"
+                             "Soll Tour 2 wirklich JETZT schon abfahren?\n\n") + frage
+            except Exception:
+                pass
         if not messagebox.askyesno("Tour 2 – Abfahrt setzen", frage):
             return
         # T2 nutzt KEINEN Snapshot mehr – die Tour-Zuweisung erfolgt live bei
@@ -7341,6 +7356,26 @@ class PickupHeuteTab:
             else:
                 r["tour"] = ""
         self._refresh_ui()
+        # T1/T2-Excel aktuell halten: solange eine Tour gestempelt ist, die Liste
+        # bei JEDER Änderung der zugeordneten Pakete neu schreiben. So enthält die
+        # Tagesliste am Ende immer alle Pakete – auch die, die NACH dem Stempeln
+        # verpackt wurden (früher blieb die Liste auf dem Stempel-Zeitpunkt stehen).
+        self._maybe_rewrite_tourlisten(tz)
+
+    def _maybe_rewrite_tourlisten(self, tz=None):
+        """Schreibt die T1-/T2-Excel neu, wenn eine Tour gestempelt ist UND sich
+        die zugeordneten Barcodes seit dem letzten Schreiben geändert haben
+        (Mengen-Vergleich → kein unnötiger Upload bei jedem Auto-Refresh)."""
+        if tz is None:
+            tz = _load_tour_zeiten()
+        for tour, gestempelt in (("T1", tz.get("t1")), ("T2", tz.get("t2"))):
+            if not gestempelt:
+                continue
+            aktuell = frozenset(r["barcode"] for r in self._all_rows
+                                if r.get("tour") == tour)
+            if aktuell != getattr(self, f"_last_written_{tour}", None):
+                setattr(self, f"_last_written_{tour}", aktuell)
+                self._upload_tourliste(tour)
 
     # ── Daten laden ──────────────────────────────────────────────────────
     def _run(self):
