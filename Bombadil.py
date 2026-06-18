@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.98"
+VERSION = "1.0.99"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8424,14 +8424,28 @@ class App(tk.Tk):
                      ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
 
         def _gal_export(versandart):
-            """Excel-Export einer Versandart: Barcode + Zeit, OHNE mögliche Duplikate,
-            Speicherort per Dialog wählbar. Barcode als Text (führende Nullen bleiben)."""
+            """Excel-Export einer Versandart im SELBEN Format wie 'DHL heute':
+            Spalten 'Package Barcode' + 'Date of Scan' (voller Zeitstempel),
+            OHNE mögliche Duplikate, Barcode als Text. Speicherort per Dialog.
+            Lädt die heutige Galadriel-CSV frisch (für den vollen Zeitstempel)."""
             def _do(rows):
                 import datetime as _dt
                 from tkinter import filedialog as _fd
-                # rows = (barcode, zeit, station, dup) → Duplikate weglassen, nur Barcode+Zeit
-                daten = [(r[0], r[1]) for r in rows if str(r[-1]).strip() != "Ja"]
-                if not daten:
+                heute = _dt.date.today().strftime("%Y-%m-%d")
+                try:
+                    df = fetch_galadriel_scans_gdrive(heute)
+                except Exception:
+                    df = None
+                if df is None or df.empty or "typ" not in df.columns:
+                    messagebox.showinfo("Export", f"Keine {versandart}-Scans vorhanden.")
+                    return
+                sub = df[df["typ"].astype(str).str.strip().str.lower() == versandart.lower()].copy()
+                # mögliche Duplikate weglassen
+                if "moeglich_duplikat" in sub.columns:
+                    _dup = (sub["moeglich_duplikat"].astype(str).str.strip()
+                            .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
+                    sub = sub[~_dup]
+                if sub.empty:
                     messagebox.showinfo(
                         "Export", f"Keine exportierbaren {versandart}-Scans vorhanden\n"
                                   "(nur Duplikate oder keine Daten).")
@@ -8444,11 +8458,20 @@ class App(tk.Tk):
                 if not pfad:
                     return
                 try:
-                    df_export = pd.DataFrame(daten, columns=["barcode", "zeit"])
-                    # Barcode als Text formatieren → führende Nullen (00340…) bleiben erhalten
-                    write_excel_text_cols(df_export, Path(pfad), ["barcode"])
+                    # Format wie DHL heute: Package Barcode + Date of Scan (echtes Datum)
+                    _dts = pd.to_datetime(sub.get("zeitstempel"), errors="coerce")
+                    try:
+                        if _dts.dt.tz is not None:
+                            _dts = _dts.dt.tz_localize(None)
+                    except Exception:
+                        pass
+                    df_export = pd.DataFrame({
+                        "Package Barcode": [clean_barcode(b) for b in sub.get("barcode", "")],
+                        "Date of Scan":    _dts.values,
+                    })
+                    write_excel_text_cols(df_export, Path(pfad), ["Package Barcode"])
                     messagebox.showinfo(
-                        "Export", f"{len(daten)} {versandart}-Scans exportiert:\n{pfad}")
+                        "Export", f"{len(df_export)} {versandart}-Scans exportiert:\n{pfad}")
                 except Exception as e:
                     messagebox.showerror("Export-Fehler", str(e))
             return _do
