@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.99"
+VERSION = "1.0.100"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -8665,6 +8665,7 @@ class App(tk.Tk):
         self.after(200,    self.load_main_orca)
         self.after(400,    self.load_dhl_orca)
         self.after(500,    self.load_galadriel_async)   # Galadriel-Scans (Drive-CSV)
+        self.after(2_000,  self._schedule_galadriel_refresh)  # eigener 2-Min-Takt für Galadriel
         self.after(600,    self.toggle_refresh)
         self.after(800,    self.toggle_dhl_refresh)
         self.after(3_000,  self.tab_statistik.load_cache_async)     # Cache zuerst, dann frische Daten
@@ -10844,6 +10845,7 @@ class App(tk.Tk):
         self._schedule_refresh()   # nächsten Refresh planen
 
     DHL_REFRESH_INTERVAL_MS = 5 * 60 * 1000   # 5 Minuten
+    GALADRIEL_REFRESH_INTERVAL_MS = 2 * 60 * 1000   # 2 Minuten (eigener Takt, passend zu Galadriels Sync)
 
     def toggle_dhl_refresh(self):
         self.dhl_refresh_on = not self.dhl_refresh_on
@@ -10872,10 +10874,21 @@ class App(tk.Tk):
             return
         import datetime as _dt
         self.load_dhl_orca()
-        self.load_galadriel_async()   # Galadriel-Scans im selben Takt aktualisieren
         now = _dt.datetime.now().strftime("%H:%M")
         self.dhl_refresh_lbl.config(text=f"Zuletzt: {now}")
         self._schedule_dhl_refresh()
+
+    # ── Galadriel-Tabs: eigener, schnellerer Refresh-Takt (alle 2 Min) ─────────
+    #    Entkoppelt vom DHL/OrcaScan-Refresh, passend zu Galadriels 2-Min-Sync.
+    def _schedule_galadriel_refresh(self):
+        self._galadriel_refresh_job = self.after(
+            self.GALADRIEL_REFRESH_INTERVAL_MS, self._auto_galadriel_refresh)
+
+    def _auto_galadriel_refresh(self):
+        try:
+            self.load_galadriel_async()
+        finally:
+            self._schedule_galadriel_refresh()
 
     def toggle_watch(self):
         self.watch_on = not self.watch_on
