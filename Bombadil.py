@@ -60,6 +60,7 @@ except ImportError:
 try:
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request as _GAuthRequest
+    from google.oauth2.credentials import Credentials as _UserCredentials
     import pickle as _pickle
     OAUTH_AVAILABLE = True
 except ImportError:
@@ -82,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.97"
+VERSION = "1.0.98"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -1816,13 +1817,22 @@ def _get_oauth_drive_service():
         # Refresh-Kollisionen, kein refresh_token-Rotations-Konflikt).
         creds = _OAUTH_CREDS
 
-        # Beim allerersten Mal: gespeichertes Token von Disk laden
+        # Beim allerersten Mal: gespeichertes Token von Disk laden.
+        # Bevorzugt JSON (versionsunabhängig, PC-übergreifend teilbar). Alte
+        # Pickle-Token (versionsabhängig, brachen bei unterschiedlichen
+        # google-auth-Versionen) werden noch gelesen und beim Speichern auf
+        # JSON migriert.
         if creds is None and OAUTH_TOKEN_FILE.exists():
             try:
-                with open(OAUTH_TOKEN_FILE, "rb") as fh:
-                    creds = _pickle.load(fh)
+                info = _json_mod.loads(OAUTH_TOKEN_FILE.read_text(encoding="utf-8"))
+                creds = _UserCredentials.from_authorized_user_info(info)
             except Exception:
-                creds = None
+                # Kein JSON → evtl. altes Pickle-Format
+                try:
+                    with open(OAUTH_TOKEN_FILE, "rb") as fh:
+                        creds = _pickle.load(fh)
+                except Exception:
+                    creds = None
 
         # Token abgelaufen → automatisch erneuern
         if creds and creds.expired and creds.refresh_token:
@@ -1858,10 +1868,10 @@ def _get_oauth_drive_service():
             )
             creds = flow.run_local_server(port=0)
 
-        # Token speichern (Disk + Cache synchron halten)
+        # Token speichern als JSON (versionsunabhängig → auf allen PCs + über
+        # NAS teilbar, anders als das alte Pickle-Format).
         try:
-            with open(OAUTH_TOKEN_FILE, "wb") as fh:
-                _pickle.dump(creds, fh)
+            OAUTH_TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
         except Exception:
             pass
         _OAUTH_CREDS = creds
