@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.100"
+VERSION = "1.0.101"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -823,18 +823,24 @@ def fetch_galadriel_scans_gdrive(datum_str: str) -> "pd.DataFrame":
         return pd.DataFrame()
 
 
-def fetch_galadriel_urbify_counts() -> dict:
-    """Lädt ALLE Galadriel-Tages-CSVs aus dem Drive-Ordner und zählt je Tag die
-    Urbify-Scans (typ=Urbify, OHNE mögliche Duplikate). Gibt {date: count} zurück.
+def fetch_galadriel_aggregat() -> tuple:
+    """Lädt ALLE Galadriel-Tages-CSVs aus dem Drive-Ordner EINMAL und liefert
+    ein Aggregat:  (normal_df, express_df, urbify_counts)
 
-    Für die Versand-Statistik: Urbify-Daten gibt es nur aus Galadriel (nicht
-    OrcaScan). Da Galadriel erst seit wenigen Tagen läuft, sind es wenige Dateien.
-    Quelle: OAuth-Token (drive.file) – wie fetch_galadriel_scans_gdrive.
-    Datum wird aus dem Dateinamen scans_YYYY-MM-DD.csv abgeleitet."""
+    - normal_df / express_df: alle Normal- bzw. Express-Scans OHNE Galadriel-interne
+      Duplikate, im Format 'Package Barcode' + 'Date of Scan' (= OrcaScan-Format).
+      So lassen sie sich per _merge_live_archiv mit den OrcaScan-DHL-Daten
+      zusammenführen und werden dabei PER BARCODE dedupliziert (kein Doppelzählen,
+      falls ein Paket doch mal in beiden Systemen ist).
+    - urbify_counts: {date: anzahl} Urbify-Scans (ohne Duplikate) – Urbify gibt es
+      nur in Galadriel.
+
+    Quelle: OAuth-Token (drive.file). Leeres Aggregat bei fehlendem Token / Fehler.
+    Datum aus dem Dateinamen scans_YYYY-MM-DD.csv."""
     import re as _re, datetime as _dt, io as _io
-    out: dict = {}
+    empty = (pd.DataFrame(), pd.DataFrame(), {})
     if not GDRIVE_AVAILABLE or not OAUTH_TOKEN_FILE.exists():
-        return out
+        return empty
     try:
         service = _get_oauth_drive_service()
         res = service.files().list(
@@ -845,7 +851,10 @@ def fetch_galadriel_urbify_counts() -> dict:
         ).execute()
         files = res.get("files", [])
     except Exception:
-        return out
+        return empty
+
+    normal_frames, express_frames = [], []
+    urbify_counts: dict = {}
     for f in files:
         m = _re.search(r"scans_(\d{4}-\d{2}-\d{2})\.csv", f.get("name", ""))
         if not m:
@@ -865,15 +874,30 @@ def fetch_galadriel_urbify_counts() -> dict:
             df = pd.read_csv(buf)
         except Exception:
             continue
-        if df.empty or "typ" not in df.columns:
+        if df.empty or "typ" not in df.columns or "barcode" not in df.columns:
             continue
-        mask = df["typ"].astype(str).str.strip().str.lower() == "urbify"
+        # mögliche Duplikate (Galadriel-intern) entfernen
         if "moeglich_duplikat" in df.columns:
-            dup = (df["moeglich_duplikat"].astype(str).str.strip()
-                   .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
-            mask = mask & ~dup
-        out[d] = int(mask.sum())
-    return out
+            _dup = (df["moeglich_duplikat"].astype(str).str.strip()
+                    .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
+            df = df[~_dup]
+        if df.empty:
+            urbify_counts[d] = 0
+            continue
+        typ_l = df["typ"].astype(str).str.strip().str.lower()
+        urbify_counts[d] = int((typ_l == "urbify").sum())
+        for _typname, _frames in (("normal", normal_frames), ("express", express_frames)):
+            sub = df[typ_l == _typname]
+            if sub.empty:
+                continue
+            _frames.append(pd.DataFrame({
+                "Package Barcode": sub["barcode"].astype(str),
+                "Date of Scan":    sub.get("zeitstempel", ""),
+            }))
+
+    normal_df  = pd.concat(normal_frames,  ignore_index=True) if normal_frames  else pd.DataFrame()
+    express_df = pd.concat(express_frames, ignore_index=True) if express_frames else pd.DataFrame()
+    return normal_df, express_df, urbify_counts
 
 
 def _delete_drive_files_by_name(filename: str, folder_id: str):
@@ -3734,7 +3758,9 @@ class StatistikTab:
         self._dhl_loading   = False
         self._dhl_loaded_date = None   # Datum des letzten DHL-Loads (gegen Einfrieren bei Dauerbetrieb)
         self._urbify_counts: dict = {}  # {date: anzahl} – Urbify-Scans aus Galadriel-CSVs
-        self._urbify_loaded_date = None  # Tagesstempel: Urbify-CSVs 1×/Tag laden
+        self._galadriel_loaded_date = None  # Tagesstempel: Galadriel-CSVs 1×/Tag laden
+        self._galadriel_normal_df  = pd.DataFrame()  # gecachte Galadriel-Normal-Scans (DHL-Statistik)
+        self._galadriel_express_df = pd.DataFrame()  # gecachte Galadriel-Express-Scans (DHL-Statistik)
 
         # ── Scrollbarer Container (geteilt) ──────────────────────────
         self.frame = tk.Frame(parent, bg=self._COL_BG)
@@ -4372,22 +4398,33 @@ class StatistikTab:
                 normal_df  = _merge_live_archiv(normal_live,  normal_arch)
                 express_df = _merge_live_archiv(express_live, express_arch)
 
-                # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
-                express_df = apply_dhl_express_korrektur(express_df)
-
-                # 3. Urbify-Zählung aus den Galadriel-CSVs (eigene Quelle, nicht OrcaScan).
-                #    Nur EINMAL pro Tag laden (lädt alle Galadriel-CSVs) – spart Drive-/
-                #    OAuth-Zugriffe. urbify_counts=None → _dhl_on_loaded behält den
-                #    bestehenden Wert.
+                # 3. Galadriel-Daten (Normal/Express/Urbify) – eigene Scan-Quelle.
+                #    DHL-Pakete werden je EINMAL gescannt (mal OrcaScan, mal Galadriel),
+                #    also disjunkt → Galadriel gehört zur Gesamtzahl dazu. Per Barcode
+                #    einmergen (dedupliziert, falls ein Paket doch mal in beiden ist).
+                #    Nur EINMAL pro Tag laden (alle CSVs) + cachen → spart Drive-Zugriffe.
                 import datetime as _dt_u
-                if getattr(self, "_urbify_loaded_date", None) != _dt_u.date.today():
+                if getattr(self, "_galadriel_loaded_date", None) != _dt_u.date.today():
                     try:
-                        urbify_counts = fetch_galadriel_urbify_counts()
-                        self._urbify_loaded_date = _dt_u.date.today()
+                        g_normal, g_express, urbify_counts = fetch_galadriel_aggregat()
+                        self._galadriel_normal_df  = g_normal
+                        self._galadriel_express_df = g_express
+                        self._galadriel_loaded_date = _dt_u.date.today()
                     except Exception:
+                        g_normal    = getattr(self, "_galadriel_normal_df",  pd.DataFrame())
+                        g_express   = getattr(self, "_galadriel_express_df", pd.DataFrame())
                         urbify_counts = None
                 else:
+                    g_normal    = getattr(self, "_galadriel_normal_df",  pd.DataFrame())
+                    g_express   = getattr(self, "_galadriel_express_df", pd.DataFrame())
                     urbify_counts = None   # heute schon geladen → bestehende Werte behalten
+
+                # Galadriel-DHL-Scans dazu (Barcode-Dedup gegen OrcaScan)
+                normal_df  = _merge_live_archiv(normal_df,  g_normal)
+                express_df = _merge_live_archiv(express_df, g_express)
+
+                # Manuelle Monats-Korrektur für Express (gegen CSV-Abweichung)
+                express_df = apply_dhl_express_korrektur(express_df)
 
                 # drive_ok bleibt für den Cache-Schutz relevant: Live allein
                 # deckt nur die letzten Tage ab; für vollständige Historie muss
