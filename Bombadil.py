@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.107"
+VERSION = "1.0.108"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -10648,6 +10648,8 @@ class App(tk.Tk):
         # Pakete heute = DHL Normal + DHL Express + PU heute + Urbify
         report_data["pakete_heute"] = (self._n_dhl_heute + self._n_dhl_express
                                        + self._n_pu_heute + self._n_urbify_heute)
+        # WICHTIG: PU-Wert beim Laden FIXIEREN (damit heute auch schon die korrekte Zahl ist)
+        self._n_pu_heute_fixed = self._n_pu_heute
         self._update_tiles(report_data)
         self._refresh_unstimmigkeiten()
         self.title(f"Bombadil  v{VERSION}")
