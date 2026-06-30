@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.100"
+VERSION = "1.0.103"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
