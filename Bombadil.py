@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.103"
+VERSION = "1.0.105"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -876,6 +876,65 @@ def fetch_galadriel_urbify_counts() -> dict:
     return out
 
 
+def fetch_galadriel_normal_express_counts() -> dict:
+    """Lädt ALLE Galadriel-Tages-CSVs aus dem Drive-Ordner und zählt je Tag die
+    Normal- und Express-Scans (ohne mögliche Duplikate). Gibt zurück:
+    {"normal": {date: count, ...}, "express": {date: count, ...}}
+
+    Für die Versand-Statistik: Normal/Express aus Galadriel sollen zur OrcaScan-Basis
+    addiert werden (nicht gemerged – zwei disjunkte Quellen). Datum aus Filename
+    scans_YYYY-MM-DD.csv. Nutzt OAuth-Token wie fetch_galadriel_scans_gdrive."""
+    import re as _re, datetime as _dt, io as _io
+    out: dict = {"normal": {}, "express": {}}
+    if not GDRIVE_AVAILABLE or not OAUTH_TOKEN_FILE.exists():
+        return out
+    try:
+        service = _get_oauth_drive_service()
+        res = service.files().list(
+            q=f"'{GDRIVE_FOLDER_GALADRIEL}' in parents "
+              f"and name contains 'scans_' and trashed = false",
+            fields="files(id, name)", pageSize=400,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+    except Exception:
+        return out
+    for f in files:
+        m = _re.search(r"scans_(\d{4}-\d{2}-\d{2})\.csv", f.get("name", ""))
+        if not m:
+            continue
+        try:
+            d = _dt.date.fromisoformat(m.group(1))
+        except Exception:
+            continue
+        try:
+            req = service.files().get_media(fileId=f["id"])
+            buf = _io.BytesIO()
+            dl  = MediaIoBaseDownload(buf, req)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            buf.seek(0)
+            df = pd.read_csv(buf)
+        except Exception:
+            continue
+        if df.empty or "typ" not in df.columns:
+            continue
+        # Duplikate filtern
+        mask_all = pd.Series([True] * len(df), index=df.index)
+        if "moeglich_duplikat" in df.columns:
+            dup = (df["moeglich_duplikat"].astype(str).str.strip()
+                   .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
+            mask_all = mask_all & ~dup
+        # Normal zählen
+        typ_normal = df["typ"].astype(str).str.strip().str.lower() == "normal"
+        out["normal"][d] = int((typ_normal & mask_all).sum())
+        # Express zählen
+        typ_express = df["typ"].astype(str).str.strip().str.lower() == "express"
+        out["express"][d] = int((typ_express & mask_all).sum())
+    return out
+
+
 def _delete_drive_files_by_name(filename: str, folder_id: str):
     """Löscht alle Dateien mit dem angegebenen Namen im Drive-Ordner."""
     if not GDRIVE_AVAILABLE:
@@ -970,7 +1029,7 @@ def load_statistik_cache(prefer_drive: bool = False) -> "dict | None":
     prefer_drive=True (Kollegen): Drive zuerst (gemeinsame Wahrheit vom
     Master-PC), lokal nur als Offline-Fallback."""
     import json as _json
-    MIN_VERSION = 6   # ab v6: DHL-Tupel ohne Same/Next day, dafür Urbify → alte verwerfen
+    MIN_VERSION = 7   # ab v7: DHL-Tupel mit separaten OrcaScan/Galadriel-Zählern (7 Felder) → v6 verwerfen
 
     def _valid(data):
         return bool(data) and ("pu" in data or "dhl" in data) \
@@ -1030,7 +1089,7 @@ def build_statistik_cache(pu_weekly, pu_daily, pu_monthly,
         return [list(r) for r in rows] if rows else []
 
     return {
-        "version":   6,
+        "version":   7,
         "erstellt":  _dt.date.today().isoformat(),
         "uhrzeit":   _dt.datetime.now().strftime("%H:%M"),
         "heute":     heute or {},
@@ -3697,8 +3756,10 @@ class StatistikTab:
     _COL_ANLIEF = "#16a085"   # teal  – Lieferungen
     _COL_ABHOL  = "#1a237e"   # indigo – Kundenabholungen
     # Farben DHL
-    _COL_NORMAL   = "#f9a825"   # gelb  – DHL Normal
-    _COL_EXPRESS  = "#b71c1c"   # rot   – DHL Express
+    _COL_NORMAL   = "#f9a825"   # gelb  – OrcaScan Normal
+    _COL_EXPRESS  = "#b71c1c"   # rot   – OrcaScan Express
+    _COL_NORMAL_GAL = "#f4d47f" # hellgelb – Galadriel Normal
+    _COL_EXPRESS_GAL = "#ef9a9a" # hellrot – Galadriel Express
     _COL_ABHOLUNG = "#2e7d32"   # grün  – Pickup
     _COL_URBIFY   = "#00838f"   # petrol/türkis – Urbify (Galadriel)
     _COL_BG       = "#f0f2f5"
@@ -3735,6 +3796,8 @@ class StatistikTab:
         self._dhl_loaded_date = None   # Datum des letzten DHL-Loads (gegen Einfrieren bei Dauerbetrieb)
         self._urbify_counts: dict = {}  # {date: anzahl} – Urbify-Scans aus Galadriel-CSVs
         self._urbify_loaded_date = None  # Tagesstempel: Urbify-CSVs 1×/Tag laden
+        self._galadriel_type_counts: dict = {"normal": {}, "express": {}}  # Galadriel Normal/Express pro Datum
+        self._galadriel_type_counts_date = None  # Tagesstempel: Normal/Express 1×/Tag laden
 
         # ── Scrollbarer Container (geteilt) ──────────────────────────
         self.frame = tk.Frame(parent, bg=self._COL_BG)
@@ -3954,12 +4017,14 @@ class StatistikTab:
 
         leg_dhl = tk.Frame(self._inner, bg=self._COL_BG)
         leg_dhl.pack(fill="x", padx=16, pady=(0, 6))
-        for color, text in [(self._COL_NORMAL,   "🚛 DHL Normal"),
-                            (self._COL_EXPRESS,  "🚚 DHL Express"),
-                            (self._COL_ABHOLUNG, "🏃 Pickup"),
-                            (self._COL_URBIFY,   "🛵 Urbify")]:
-            tk.Frame(leg_dhl, bg=color, width=14, height=14, relief="flat").pack(side="left")
-            tk.Label(leg_dhl, text=f" {text}   ", font=("Segoe UI", 9),
+        for color, text in [(self._COL_NORMAL,     "🚛 Normal(OrcaScan)"),
+                            (self._COL_NORMAL_GAL, "🚛 Normal(Galadriel)"),
+                            (self._COL_EXPRESS,    "🚚 Express(OrcaScan)"),
+                            (self._COL_EXPRESS_GAL,"🚚 Express(Galadriel)"),
+                            (self._COL_ABHOLUNG,   "🏃 Pickup"),
+                            (self._COL_URBIFY,     "🛵 Urbify")]:
+            tk.Frame(leg_dhl, bg=color, width=12, height=12, relief="flat").pack(side="left")
+            tk.Label(leg_dhl, text=f" {text} ", font=("Segoe UI", 8),
                      bg=self._COL_BG, fg="#2c3e50").pack(side="left")
 
         # ── Gesamt-Kacheln (Woche + Monat) ──────────────────────────────
@@ -4388,6 +4453,21 @@ class StatistikTab:
                         urbify_counts = None
                 else:
                     urbify_counts = None   # heute schon geladen → bestehende Werte behalten
+
+                # 4. Galadriel-Normal/Express-Zählung (separate Quelle, 1× pro Tag).
+                #    Anders als Urbify wird Normal/Express nicht gemerged, sondern separat
+                #    in der Statistik-Berechnung addiert (Zwei-Pfad-Modell).
+                import datetime as _dt_gal
+                if getattr(self, "_galadriel_type_counts_date", None) != _dt_gal.date.today():
+                    try:
+                        gal_counts = fetch_galadriel_normal_express_counts()
+                        self._galadriel_type_counts = gal_counts
+                        self._galadriel_type_counts_date = _dt_gal.date.today()
+                    except Exception:
+                        self._galadriel_type_counts = {"normal": {}, "express": {}}
+                        self._galadriel_type_counts_date = _dt_gal.date.today()
+                else:
+                    pass  # bereits heute geladen → bestehende Werte in self._galadriel_type_counts behalten
 
                 # drive_ok bleibt für den Cache-Schutz relevant: Live allein
                 # deckt nur die letzten Tage ab; für vollständige Historie muss
@@ -5143,10 +5223,30 @@ class StatistikTab:
                     total += c
             return total
 
-        # Kacheln
-        n_woche  = (count(normal_dates,   week_start)  + count(express_dates,  week_start)
+        def count_galadriel_normal_in_range(start, end=None):
+            """Zählt Normal-Pakete aus Galadriel-CSVs im Zeitraum [start, end)."""
+            total = 0
+            gal_counts = getattr(self, "_galadriel_type_counts", {}).get("normal", {})
+            for d, c in gal_counts.items():
+                if d >= start and (end is None or d < end):
+                    total += c
+            return total
+
+        def count_galadriel_express_in_range(start, end=None):
+            """Zählt Express-Pakete aus Galadriel-CSVs im Zeitraum [start, end)."""
+            total = 0
+            gal_counts = getattr(self, "_galadriel_type_counts", {}).get("express", {})
+            for d, c in gal_counts.items():
+                if d >= start and (end is None or d < end):
+                    total += c
+            return total
+
+        # Kacheln – addieren OrcaScan + Galadriel (separate Quellen)
+        n_woche  = (count(normal_dates,   week_start)  + count_galadriel_normal_in_range(week_start)
+                    + count(express_dates,  week_start) + count_galadriel_express_in_range(week_start)
                     + count_pu_in_range(week_start) + count_urbify_in_range(week_start))
-        n_monat  = (count(normal_dates,   month_start) + count(express_dates,  month_start)
+        n_monat  = (count(normal_dates,   month_start) + count_galadriel_normal_in_range(month_start)
+                    + count(express_dates,  month_start) + count_galadriel_express_in_range(month_start)
                     + count_pu_in_range(month_start) + count_urbify_in_range(month_start))
         self._lbl_gesamt_woche.config(   text=str(n_woche))
         self._lbl_gesamt_monat.config(   text=str(n_monat))
@@ -5156,7 +5256,7 @@ class StatistikTab:
         self._lbl_urbify_woche.config(   text=str(count_urbify_in_range(week_start)))
 
         # Wochendaten (letzte 4 Kalenderwochen)
-        # Tupel-Layout: (label, normal, express, pickup, urbify)
+        # Tupel-Layout: (label, normal_orca, normal_gal, express_orca, express_gal, pickup, urbify)
         weekly = []
         for i in range(3, -1, -1):
             ws = week_start - timedelta(weeks=i)
@@ -5164,26 +5264,31 @@ class StatistikTab:
             kw = ws.isocalendar()[1]
             lbl = f"KW {kw:02d}\n{ws.strftime('%d.%m.')}–{(we - timedelta(days=1)).strftime('%d.%m.')}"
             weekly.append((lbl, count(normal_dates, ws, we),
-                           count(express_dates, ws, we), count_pu_in_range(ws, we),
+                           count_galadriel_normal_in_range(ws, we),
+                           count(express_dates, ws, we),
+                           count_galadriel_express_in_range(ws, we),
+                           count_pu_in_range(ws, we),
                            count_urbify_in_range(ws, we)))
         self._dhl_weekly_data = weekly
 
         # Tagesdaten (letzte 28 Tage)
-        # Tupel-Layout: (label, normal, express, pickup, urbify, weekday)
+        # Tupel-Layout: (label, normal_orca, normal_gal, express_orca, express_gal, pickup, urbify, weekday)
         daily = []
         for i in range(27, -1, -1):
             d      = today - timedelta(days=i)
             d_next = d + timedelta(days=1)
             daily.append((d.strftime("%d.%m."),
                           count(normal_dates,   d, d_next),
+                          count_galadriel_normal_in_range(d, d_next),
                           count(express_dates,  d, d_next),
+                          count_galadriel_express_in_range(d, d_next),
                           count_pu_in_range(d, d_next),
                           count_urbify_in_range(d, d_next),
                           d.weekday()))
         self._dhl_daily_data = daily
 
         # Monatsdaten (letzte 6 Monate)
-        # Tupel-Layout: (label, normal, express, pickup, urbify, mkey)
+        # Tupel-Layout: (label, normal_orca, normal_gal, express_orca, express_gal, pickup, urbify, mkey)
         monthly = []
         for i in range(5, -1, -1):
             m_year  = today.year
@@ -5201,7 +5306,9 @@ class StatistikTab:
                 pu_m = PU_MONATS_FEST[mkey]
             monthly.append((ms.strftime("%b %y"),
                             count(normal_dates,   ms, me),
+                            count_galadriel_normal_in_range(ms, me),
                             count(express_dates,  ms, me),
+                            count_galadriel_express_in_range(ms, me),
                             pu_m,
                             count_urbify_in_range(ms, me),
                             mkey))    # Monatsschlüssel für Ziele
@@ -5423,9 +5530,23 @@ class StatistikTab:
             group_h = N_BARS * BAR_H + (N_BARS - 1) * BAR_GAP
 
         for i, row in enumerate(data):
-            label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
-            n_urbify = row[4]
-            mkey = row[5] if len(row) > 5 else None
+            # NEU (v7): Tupel hat 7 Felder: (label, n_orca, n_gal, e_orca, e_gal, pu, urb[, mkey])
+            # ALT (v6): Tupel hatte 5 Felder: (label, n, e, pu, urb[, mkey])
+            # Unterscheidung: Länge > 5 = neue Struktur
+            if len(row) > 5 and isinstance(row[1], int) and isinstance(row[2], int):
+                # v7: addiere OrcaScan + Galadriel
+                label = row[0]
+                n_normal = row[1] + row[2]      # n_orca + n_gal
+                n_express = row[3] + row[4]     # e_orca + e_gal
+                n_abholung = row[5]
+                n_urbify = row[6]
+                mkey = row[7] if len(row) > 7 else None
+            else:
+                # Fallback für alte v6 Struktur (sollte nicht vorkommen)
+                label, n_normal, n_express, n_abholung = row[0], row[1], row[2], row[3]
+                n_urbify = row[4]
+                mkey = row[5] if len(row) > 5 else None
+
             y0    = PAD_TOP + i * (group_h + GROUP_GAP)
             y_mid = y0 + group_h // 2
 
@@ -5540,9 +5661,9 @@ class StatistikTab:
         if idx < 0 or idx >= len(data):
             return
         row = data[idx]
-        if len(row) < 7:
+        if len(row) < 8:
             return
-        label, mkey = row[0], row[6]
+        label, mkey = row[0], row[7]  # v7: mkey bei Index 7 (nicht 6 wie v6)
         from tkinter import simpledialog
         goals = _load_monthly_goals("dhl")
         current = goals.get(mkey, 0)
@@ -5577,8 +5698,16 @@ class StatistikTab:
         bar_gap = max(int(group_w * 0.02), 1)
         base_y  = canvas_h - PAD_BOTTOM
 
-        max_cnt = max((max(na, nb, nc, nd) for _, na, nb, nc, nd, _ in data),
-                      default=1) or 1
+        # v7: neue Tupel-Struktur mit separaten OrcaScan/Galadriel-Zählern
+        max_vals = []
+        for row in data:
+            if len(row) >= 7:
+                # v7: (label, n_o, n_g, e_o, e_g, pu, urb, [weekday])
+                max_vals.append(max(row[1]+row[2], row[3]+row[4], row[5], row[6]))
+            else:
+                # v6 fallback: (label, n, e, pu, urb, [weekday])
+                max_vals.append(max(row[1], row[2], row[3], row[4]))
+        max_cnt = max(max_vals, default=1) or 1
 
         y_half = PAD_TOP + chart_h // 2
         c.create_line(PAD_LEFT, y_half, canvas_w - PAD_RIGHT, y_half,
@@ -5586,7 +5715,18 @@ class StatistikTab:
         c.create_text(PAD_LEFT - 2, y_half, text=str(max_cnt // 2),
                       anchor="e", font=("Segoe UI", 7), fill="#bbb")
 
-        for i, (label, n_normal, n_express, n_abholung, n_urbify, weekday) in enumerate(data):
+        for i, row in enumerate(data):
+            # Unpack mit Struktur-Anpassung
+            if len(row) >= 7:
+                # v7: (label, n_o, n_g, e_o, e_g, pu, urb[, weekday])
+                label, n_normal_o, n_normal_g, n_express_o, n_express_g, n_abholung, n_urbify = row[0], row[1], row[2], row[3], row[4], row[5], row[6]
+                weekday = row[7] if len(row) > 7 else 0
+                n_normal = n_normal_o + n_normal_g
+                n_express = n_express_o + n_express_g
+            else:
+                # v6 fallback: (label, n, e, pu, urb[, weekday])
+                label, n_normal, n_express, n_abholung, n_urbify = row[0], row[1], row[2], row[3], row[4]
+                weekday = row[5] if len(row) > 5 else 0
             gx = PAD_LEFT + (i + 0.5) * group_w
 
             if weekday == 0 and i > 0:
