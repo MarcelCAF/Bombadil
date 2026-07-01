@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.110"
+VERSION = "1.0.111"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -7097,7 +7097,14 @@ class PickupHeuteTab:
                         neu.append(row)
                 self._all_rows = neu
                 self._refresh_ui()
-                self.status_lbl.config(text=f"✓  {n} aus Tagesboten gelöscht", fg="#27ae60")
+                # WICHTIG: PU-Wert nicht neu rechnen, sondern fixierten Wert verwenden
+                # (wurde um 17:00 beim Backup FIXIERT, bei Löschung nur -1)
+                self._n_pu_heute_fixed = max(0, self._n_pu_heute_fixed - n)
+                self._n_pu_heute = self._n_pu_heute_fixed
+                # Kachel + Statistik aktualisieren (ohne Datenbeschaffung neu zu rechnen)
+                report = {"pakete_heute": self.root._n_dhl_heute + self.root._n_dhl_express + self._n_pu_heute + self.root._n_urbify_heute, "pu": self._n_pu_heute}
+                self.root._update_tiles(report)
+                self.status_lbl.config(text=f"✓  {n} aus Tagesboten gelöscht (PU: {self._n_pu_heute})", fg="#27ae60")
 
         _thr.Thread(target=_worker, daemon=True).start()
 
@@ -7947,6 +7954,7 @@ class App(tk.Tk):
         self._n_dhl_heute    = 0   # DHL Normal für "Pakete heute"-Kachel
         self._n_dhl_express  = 0   # DHL Express für "Pakete heute"-Kachel
         self._n_pu_heute     = 0   # PU heute für "Pakete heute"-Kachel
+        self._n_pu_heute_fixed = 0 # PU-Wert beim 17:00-Backup FIXIERT (bleibt auch bei Tagesbote-Löschung)
         self._n_urbify_heute = 0   # Urbify (Galadriel) für "Pakete heute"-Kachel
         self._pu_heute_detail = {}  # PU-Aufschlüsselung für Mobile-Dashboard
         self._n_pu_verpackt  = 0   # Davon Verpackt (PU) für Prozentanzeige
@@ -10925,6 +10933,8 @@ class App(tk.Tk):
                     print(f"[DHL-Backup] Fehler: {e}")
                 try:
                     backup_tagesbote_to_gdrive()
+                    # WICHTIG: PU-Wert um 17:00 FIXIEREN (bleibt auch bei Tagesbote-Löschung)
+                    self._n_pu_heute_fixed = self._n_pu_heute
                 except Exception as e:
                     print(f"[Tagesbote-Backup] Fehler: {e}")
                 today_str = datetime.now().strftime("%Y-%m-%d")
