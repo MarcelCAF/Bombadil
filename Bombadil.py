@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.111"
+VERSION = "1.0.112"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -4331,11 +4331,10 @@ class StatistikTab:
                 text="⚠  Drive-Archiv unvollständig – Cache NICHT aktualisiert")
             return
         if self._archiv_df is None:
-            # PU-Archiv nicht geladen → Daten unvollständig → nicht cachen.
-            # Der alte (gute) Cache bleibt erhalten, statt mit Lücken überschrieben.
+            # PU-Archiv nicht geladen → Warnung anzeigen aber trotzdem speichern,
+            # damit Tageswerte auf dem Handy aktuell bleiben.
             self._pu_status_lbl.config(
-                text="⚠  PU-Archiv fehlt – Cache NICHT aktualisiert")
-            return
+                text="⚠  PU-Archiv fehlt – Cache wird trotzdem gespeichert")
         self._save_cache_async()
 
     def _save_cache_async(self):
