@@ -83,7 +83,7 @@ TAGESBOTE_CACHE_DIR = BASE_DIR / "tagesbote_cache"
 # ============================================================
 # Version & Auto-Updater
 # ============================================================
-VERSION = "1.0.112"
+VERSION = "1.0.114"
 
 GITHUB_RAW = "https://raw.githubusercontent.com/MarcelCAF/Bombadil/master"
 
@@ -825,7 +825,8 @@ def fetch_galadriel_scans_gdrive(datum_str: str) -> "pd.DataFrame":
 
 def fetch_galadriel_urbify_counts() -> dict:
     """Lädt ALLE Galadriel-Tages-CSVs aus dem Drive-Ordner und zählt je Tag die
-    Urbify-Scans (typ=Urbify, OHNE mögliche Duplikate). Gibt {date: count} zurück.
+    Urbify-Scans (typ beginnt mit "Urbify" – also "Urbify Same Day" UND
+    "Urbify Next Day", OHNE mögliche Duplikate). Gibt {date: count} zurück.
 
     Für die Versand-Statistik: Urbify-Daten gibt es nur aus Galadriel (nicht
     OrcaScan). Da Galadriel erst seit wenigen Tagen läuft, sind es wenige Dateien.
@@ -867,7 +868,7 @@ def fetch_galadriel_urbify_counts() -> dict:
             continue
         if df.empty or "typ" not in df.columns:
             continue
-        mask = df["typ"].astype(str).str.strip().str.lower() == "urbify"
+        mask = df["typ"].astype(str).str.strip().str.lower().str.startswith("urbify")
         if "moeglich_duplikat" in df.columns:
             dup = (df["moeglich_duplikat"].astype(str).str.strip()
                    .isin(["1", "1.0", "True", "true", "Ja", "ja"]))
@@ -8569,6 +8570,10 @@ class App(tk.Tk):
             return "#ff9999" if str(row[-1]).strip() == "Ja" else None
         _gal_cols = [("barcode", "Barcode", 240), ("zeitstempel", "Zeit", 160),
                      ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
+        # Urbify-Tab hat zusätzlich "Versandart" (Same day/Next day) zwischen Zeit und Station
+        _gal_cols_urbify = [("barcode", "Barcode", 240), ("zeitstempel", "Zeit", 160),
+                             ("versandart", "Versandart", 110),
+                             ("station", "Station", 140), ("dup", "⚠ Duplikat?", 100)]
 
         def _gal_export(versandart):
             """Excel-Export einer Versandart im SELBEN Format wie 'DHL heute':
@@ -8586,7 +8591,12 @@ class App(tk.Tk):
                 if df is None or df.empty or "typ" not in df.columns:
                     messagebox.showinfo("Export", f"Keine {versandart}-Scans vorhanden.")
                     return
-                sub = df[df["typ"].astype(str).str.strip().str.lower() == versandart.lower()].copy()
+                _typ_l = df["typ"].astype(str).str.strip().str.lower()
+                if versandart.lower() == "urbify":
+                    # Urbify umfasst jetzt zwei Galadriel-Typen: "Urbify Same Day" + "Urbify Next Day"
+                    sub = df[_typ_l.str.startswith("urbify")].copy()
+                else:
+                    sub = df[_typ_l == versandart.lower()].copy()
                 # mögliche Duplikate weglassen
                 if "moeglich_duplikat" in sub.columns:
                     _dup = (sub["moeglich_duplikat"].astype(str).str.strip()
@@ -8623,15 +8633,15 @@ class App(tk.Tk):
                     messagebox.showerror("Export-Fehler", str(e))
             return _do
 
-        def _make_gal_tab(titel, versandart):
-            return TableTab(self.nb, titel, _gal_cols, today_header=True,
+        def _make_gal_tab(titel, versandart, cols=None):
+            return TableTab(self.nb, titel, cols or _gal_cols, today_header=True,
                             row_color_fn=_galadriel_color,
                             legend_items=[("#ff9999", "Mögliches Duplikat")],
                             on_export=_gal_export(versandart),
                             export_label="📁  Tages-Export (Excel)")
         self.tab_gal_express = _make_gal_tab("Galadriel – DHL Express (heute)", "Express")
         self.tab_gal_normal  = _make_gal_tab("Galadriel – DHL Normal (heute)", "Normal")
-        self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)", "Urbify")
+        self.tab_gal_urbify  = _make_gal_tab("Galadriel – Urbify (heute)", "Urbify", cols=_gal_cols_urbify)
         self.nb.add(self.tab_gal_express.frame, text="  Express (Galadriel)  ")
         self.nb.add(self.tab_gal_normal.frame,  text="  Normal (Galadriel)  ")
         self.nb.add(self.tab_gal_urbify.frame,  text="  Urbify  ")
@@ -9791,7 +9801,7 @@ class App(tk.Tk):
              "aus Google Drive (CSV, nur typ=Normal)."),
             ("gal_urbify",  "📡  Urbify (Galadriel)", self.tab_gal_urbify.frame,
              "Galadriel – Urbify-Scans des Tages\n"
-             "aus Google Drive (CSV, nur typ=Urbify)."),
+             "aus Google Drive (CSV, typ=Urbify Same Day + Urbify Next Day)."),
             ("moria",       "🔍  DHL Sendungssuche", self.tab_moria,
              "Gimli – sucht eine DHL-Sendungsnummer in\n"
              "allen geladenen DHL-Daten (Express + Normal,\n"
@@ -10733,15 +10743,22 @@ class App(tk.Tk):
             if df is not None and not df.empty:
                 for _, r in df.iterrows():
                     dup = "Ja" if _g(r, "moeglich_duplikat") in ("1", "1.0", "True", "true", "Ja", "ja") else ""
-                    zeile = (_g(r, "barcode"), _zeit(r.get("zeitstempel", "")),
-                             _g(r, "station"), dup)
+                    barcode = _g(r, "barcode")
+                    zeit    = _zeit(r.get("zeitstempel", ""))
+                    station = _g(r, "station")
                     typ = _g(r, "typ").lower()
                     if typ == "express":
-                        rows_ex.append(zeile)
+                        rows_ex.append((barcode, zeit, station, dup))
                     elif typ == "normal":
-                        rows_no.append(zeile)
-                    elif typ == "urbify":
-                        rows_ur.append(zeile)
+                        rows_no.append((barcode, zeit, station, dup))
+                    elif typ.startswith("urbify"):
+                        if "same" in typ:
+                            versandart = "Same day"
+                        elif "next" in typ:
+                            versandart = "Next day"
+                        else:
+                            versandart = ""
+                        rows_ur.append((barcode, zeit, versandart, station, dup))
                     # andere Typen (z.B. "Unbekannt") werden keinem Tab zugeordnet
 
             # Urbify-Pakete heute OHNE mögliche Duplikate (für "Pakete heute"-Kachel)
